@@ -9,14 +9,14 @@ pyinstaller ^
   --windowed ^
   --name "Swiss Downloader" ^
   --add-data "ui;ui" ^
-  --add-data "version.py;." ^
-  --hidden-import "pywebview.platforms.winforms" ^
-  --hidden-import "clr" ^
+  --collect-all pywebview ^
   app.py
 
 echo.
 if exist "dist\Swiss Downloader.exe" (
-  echo Done! dist\Swiss Downloader.exe is ready to share.
+  echo ============================================
+  echo  Done!  dist\Swiss Downloader.exe is ready.
+  echo ============================================
 ) else (
   echo Build may have failed. Check the output above.
 )

@@ -10,7 +10,9 @@ from backend import API
 
 def main():
     api        = API()
-    html_path  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "index.html")
+    # sys._MEIPASS is set by PyInstaller when running as a bundled .exe
+    base_dir   = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    html_path  = os.path.join(base_dir, "ui", "index.html")
 
     window = webview.create_window(
         title      = "Kokin's Swiss Downloader",

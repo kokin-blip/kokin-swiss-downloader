@@ -93,6 +93,7 @@ html, body {
 .title-bar-controls {
   display: flex;
   gap: 2px;
+  flex-shrink: 0;
   -webkit-app-region: no-drag;
 }
 .title-bar-controls button {
@@ -583,6 +584,14 @@ hr.separator {
 
       <div class="flex-row mt4" style="gap:20px">
         <label class="form-check">
+          <input type="checkbox" id="embedThumb" checked> Embed cover art
+        </label>
+        <label class="form-check">
+          <input type="checkbox" id="embedMeta" checked> Embed metadata <span class="label-sm">(title, artist, album…)</span>
+        </label>
+      </div>
+      <div class="flex-row mt4" style="gap:20px">
+        <label class="form-check">
           <input type="checkbox" id="keepOriginal"> Keep original file
         </label>
         <label class="form-check">
@@ -797,10 +806,12 @@ async function startDownload() {
   const qual   = parseInt(document.getElementById('qualitySlider').value, 10);
   const keep   = document.getElementById('keepOriginal').checked;
   const listFm = document.getElementById('listFormats').checked;
+  const thumb  = document.getElementById('embedThumb').checked;
+  const meta   = document.getElementById('embedMeta').checked;
 
   if (!url) { appendLog('No URL provided.', 'err'); return; }
 
-  const result = await api('start_download', url, outDir, qual, keep, listFm);
+  const result = await api('start_download', url, outDir, qual, keep, listFm, thumb, meta);
   if (!result.ok) { appendLog(result.msg, 'err'); return; }
 
   document.getElementById('btnDownload').disabled = true;

@@ -17,7 +17,7 @@ except ImportError:
 import settings as cfg
 from providers import (OdesliResolver, QobuzAPI, SpotiflacProxy,
                        MusicBrainz, is_drm_error, extract_qobuz_id)
-from utils import find_ffmpeg
+from utils import find_ffmpeg, tag_flac_file
 from version import __version__, GITHUB_OWNER, GITHUB_REPO
 
 DEFAULT_OUT = str(Path.home() / "Music" / "Swiss Downloads")
@@ -95,7 +95,9 @@ class API:
 
     def start_download(self, url: str, output_dir: str,
                        quality: int, keep_original: bool,
-                       list_formats: bool) -> dict:
+                       list_formats: bool,
+                       embed_thumb: bool = True,
+                       embed_meta: bool = True) -> dict:
         if self._downloading:
             return {"ok": False, "msg": "Already downloading."}
         url = url.strip()
@@ -108,7 +110,8 @@ class API:
         self._abort_flag  = False
         threading.Thread(
             target=self._worker,
-            args=(url, output_dir, int(quality), bool(keep_original), bool(list_formats)),
+            args=(url, output_dir, int(quality), bool(keep_original),
+                  bool(list_formats), bool(embed_thumb), bool(embed_meta)),
             daemon=True,
         ).start()
         return {"ok": True}
@@ -141,7 +144,8 @@ class API:
     def _provider(self, key: str, state: str):
         self._emit("provider", key=key, state=state)
 
-    def _worker(self, url, output_dir, quality, keep, list_fmt):
+    def _worker(self, url, output_dir, quality, keep, list_fmt,
+                embed_thumb=True, embed_meta=True):
         s          = cfg.load()
         proxy      = s.get("proxy") or None
         ffmpeg_dir = find_ffmpeg()
@@ -168,24 +172,66 @@ class API:
             def error(self, m):  self.cb(m, "err"); self.errors.append(m)
 
         def make_opts(target_url):
-            tpl  = str(Path(output_dir) / "%(uploader)s - %(title)s.%(ext)s")
+            tpl = str(Path(output_dir) / "%(artist|%(uploader)s)s - %(title)s.%(ext)s")
+            pps = [{"key": "FFmpegExtractAudio",
+                    "preferredcodec": "flac",
+                    "preferredquality": str(quality)}]
+            if embed_meta:
+                pps.append({"key": "FFmpegMetadata", "add_metadata": True})
+            if embed_thumb:
+                pps.append({"key": "EmbedThumbnail"})
             opts = {
-                "format": "bestaudio/best",
-                "outtmpl": tpl,
-                "postprocessors": [
-                    {"key": "FFmpegExtractAudio",
-                     "preferredcodec": "flac",
-                     "preferredquality": str(quality)},
-                    {"key": "FFmpegMetadata"},
-                    {"key": "EmbedThumbnail"},
-                ],
-                "writethumbnail": True,
-                "keepvideo":      keep,
-                "progress_hooks": [ydl_hook],
+                "format":          "bestaudio/best",
+                "outtmpl":         tpl,
+                "postprocessors":  pps,
+                "writethumbnail":  embed_thumb,
+                "keepvideo":       keep,
+                "progress_hooks":  [ydl_hook],
             }
             if ffmpeg_dir: opts["ffmpeg_location"] = str(ffmpeg_dir)
             if proxy:      opts["proxy"] = proxy
             return opts
+
+        def fetch_cover(cover_url: str):
+            """Download cover art, return (bytes, mime) or (None, None)."""
+            if not cover_url:
+                return None, None
+            try:
+                import urllib.request as _ur
+                req = _ur.Request(cover_url, headers={"User-Agent": "Mozilla/5.0"})
+                from providers import _opener
+                with _opener(proxy).open(req, timeout=10) as r:
+                    data = r.read()
+                    mime = r.headers.get("Content-Type", "image/jpeg").split(";")[0]
+                    return data, mime
+            except Exception:
+                return None, None
+
+        def tag_proxy_file(out_file: Path, track_info: dict):
+            """Tag a proxy-downloaded FLAC with metadata + optional cover art."""
+            if not (embed_meta or embed_thumb):
+                return
+            cover_data, cover_mime = None, "image/jpeg"
+            if embed_thumb:
+                cover_url = ((track_info.get("album") or {})
+                             .get("image", {}).get("large", ""))
+                cover_data, cover_mime = fetch_cover(cover_url)
+            tag_flac_file(out_file,
+                          track_info if embed_meta else {},
+                          cover_data, cover_mime or "image/jpeg")
+            if embed_meta:
+                artist = (track_info.get("performer") or {}).get("name", "")
+                title  = track_info.get("title", "")
+                if artist and title:
+                    import re as _re
+                    safe = _re.sub(r'[<>:"/\\|?*]', "_", f"{artist} - {title}")
+                    renamed = out_file.parent / f"{safe}{out_file.suffix}"
+                    try:
+                        out_file.rename(renamed)
+                        return renamed
+                    except Exception:
+                        pass
+            return out_file
 
         try:
             Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -265,6 +311,22 @@ class API:
                     except Exception as e2:
                         self._log(f"  {plat} failed: {e2}", "warn")
 
+            # 3.5 YouTube search — uses artist+title from Odesli, bypasses DRM entirely
+            if artist and title:
+                search = f"ytsearch1:{artist} - {title}"
+                self._log(f"Searching YouTube: {artist} — {title}", "info")
+                lg3  = Logger(self._log)
+                opts3 = make_opts(search)
+                opts3["logger"] = lg3
+                try:
+                    with yt_dlp.YoutubeDL(opts3) as ydl:
+                        ydl.download([search])
+                    self._provider("ytdlp", "ok")
+                    self._log(f"Done via YouTube search! Saved to: {output_dir}", "bright")
+                    return
+                except Exception as e3:
+                    self._log(f"  YouTube search failed: {e3}", "warn")
+
             # 4. SpotiFlac proxy (anonymous — no account needed)
             self._provider("proxy", "active")
             qobuz_id = None
@@ -276,15 +338,25 @@ class API:
                     qobuz_id = extract_qobuz_id(qobuz_url)
 
             # Fall back to anonymous Qobuz search
+            qobuz_track_info = {}
             if not qobuz_id and artist and title:
                 self._log("Looking up Qobuz track ID (anonymous search)…", "dim")
                 try:
                     tracks = QobuzAPI().search_track_anon(f"{artist} {title}", proxy=proxy)
                     if tracks:
+                        qobuz_track_info = tracks[0]
                         qobuz_id = str(tracks[0]["id"])
                         t_title  = tracks[0].get("title", "?")
-                        t_artist = tracks[0].get("performer", {}).get("name", "?")
+                        t_artist = (tracks[0].get("performer") or {}).get("name", "?")
                         self._log(f"Qobuz match: {t_artist} — {t_title} (id {qobuz_id})", "dim")
+                except Exception:
+                    pass
+            elif qobuz_id and artist and title:
+                # We got the ID from Odesli URL — try to also fetch track metadata
+                try:
+                    tracks = QobuzAPI().search_track_anon(f"{artist} {title}", proxy=proxy)
+                    if tracks:
+                        qobuz_track_info = tracks[0]
                 except Exception:
                     pass
 
@@ -297,7 +369,9 @@ class API:
                     fmt_id=fmt, on_progress=self._progress, proxy=proxy)
                 if out_file:
                     self._provider("proxy", "ok")
-                    self._log(f"Downloaded via {svc}: {out_file.name}", "bright")
+                    result = tag_proxy_file(out_file, qobuz_track_info)
+                    final  = result if isinstance(result, Path) else out_file
+                    self._log(f"Downloaded via {svc}: {final.name}", "bright")
                     self._log(f"Done! Saved to: {output_dir}", "bright")
                     return
                 else:
@@ -324,17 +398,20 @@ class API:
                         try:
                             tracks = QobuzAPI().search_track_anon(f"isrc:{isrc}", proxy=proxy)
                             if tracks:
-                                isrc_id = str(tracks[0]["id"])
+                                isrc_track = tracks[0]
+                                isrc_id    = str(isrc_track["id"])
                                 self._log(f"Proxy download via ISRC match (id {isrc_id})…", "info")
                                 self._provider("proxy", "active")
-                                sf = SpotiflacProxy()
+                                sf  = SpotiflacProxy()
                                 fmt = s.get("qobuz_format", 6)
                                 out_file, svc = sf.try_download(
                                     isrc_id, Path(output_dir),
                                     fmt_id=fmt, on_progress=self._progress, proxy=proxy)
                                 if out_file:
                                     self._provider("proxy", "ok")
-                                    self._log(f"Saved: {out_file.name}", "bright")
+                                    result = tag_proxy_file(out_file, isrc_track)
+                                    final  = result if isinstance(result, Path) else out_file
+                                    self._log(f"Saved: {final.name}", "bright")
                                     self._log(f"Done! Saved to: {output_dir}", "bright")
                                     return
                                 else:
