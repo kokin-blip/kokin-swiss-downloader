@@ -3,6 +3,10 @@ echo Installing/updating PyInstaller...
 python -m pip install pyinstaller --quiet
 
 echo.
+echo Generating icon...
+python make_icon.py
+
+echo.
 echo Building Swiss Downloader...
 pyinstaller ^
   --onefile ^
@@ -10,6 +14,7 @@ pyinstaller ^
   --name "Swiss Downloader" ^
   --add-data "ui;ui" ^
   --collect-all pywebview ^
+  --icon icon.ico ^
   app.py
 
 echo.
