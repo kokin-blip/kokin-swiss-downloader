@@ -1,0 +1,948 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Kokin's Swiss Downloader</title>
+<style>
+/* ── Win95 CSS (based on themesberg/windows-95-ui-kit) ─────────────────── */
+:root {
+  --win-gray:    #c0c0c0;
+  --win-dark:    #808080;
+  --win-darker:  #0a0a0a;
+  --win-light:   #ffffff;
+  --win-lighter: #dfdfdf;
+  --win-blue:    #000080;
+  --win-teal:    #008080;
+  --win-text:    #000000;
+  --font:        'MS Sans Serif', Tahoma, Arial, sans-serif;
+  --font-sz:     11px;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  width: 700px; height: 820px;
+  overflow: hidden;
+  background: var(--win-teal);
+  font-family: var(--font);
+  font-size: var(--font-sz);
+  color: var(--win-text);
+  user-select: none;
+}
+
+/* ── Beveled borders ──────────────────────────────────────────────────────── */
+.raised {
+  box-shadow:
+    inset -1px -1px 0 var(--win-darker),
+    inset  1px  1px 0 var(--win-light),
+    inset -2px -2px 0 var(--win-dark),
+    inset  2px  2px 0 var(--win-lighter);
+}
+.sunken {
+  box-shadow:
+    inset  1px  1px 0 var(--win-darker),
+    inset -1px -1px 0 var(--win-light),
+    inset  2px  2px 0 var(--win-dark),
+    inset -2px -2px 0 var(--win-lighter);
+}
+.border-flat {
+  box-shadow:
+    inset  1px  1px 0 var(--win-darker),
+    inset -1px -1px 0 var(--win-light);
+}
+
+/* ── Main window ──────────────────────────────────────────────────────────── */
+.window {
+  width: 700px; height: 820px;
+  background: var(--win-gray);
+  display: flex;
+  flex-direction: column;
+  box-shadow:
+    inset -1px -1px 0 var(--win-darker),
+    inset  1px  1px 0 var(--win-light),
+    inset -2px -2px 0 var(--win-dark),
+    inset  2px  2px 0 var(--win-lighter);
+}
+
+/* ── Title bar ───────────────────────────────────────────────────────────── */
+.title-bar {
+  background: var(--win-blue);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  padding: 3px 4px;
+  height: 22px;
+  flex-shrink: 0;
+  cursor: move;
+  -webkit-app-region: drag;
+}
+.title-bar-icon {
+  width: 16px; height: 16px;
+  margin-right: 4px;
+  flex-shrink: 0;
+  -webkit-app-region: no-drag;
+}
+.title-bar-text {
+  font-weight: bold;
+  font-size: 11px;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  letter-spacing: 0;
+}
+.title-bar-controls {
+  display: flex;
+  gap: 2px;
+  -webkit-app-region: no-drag;
+}
+.title-bar-controls button {
+  width: 16px; height: 14px;
+  background: var(--win-gray);
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: bold;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow:
+    inset -1px -1px 0 var(--win-darker),
+    inset  1px  1px 0 var(--win-light),
+    inset -2px -2px 0 var(--win-dark),
+    inset  2px  2px 0 var(--win-lighter);
+}
+.title-bar-controls button:active {
+  box-shadow:
+    inset  1px  1px 0 var(--win-darker),
+    inset -1px -1px 0 var(--win-light),
+    inset  2px  2px 0 var(--win-dark),
+    inset -2px -2px 0 var(--win-lighter);
+  padding-top: 1px;
+  padding-left: 1px;
+}
+
+/* ── Tabs ─────────────────────────────────────────────────────────────────── */
+.tab-strip {
+  display: flex;
+  padding: 6px 6px 0;
+  background: var(--win-gray);
+  flex-shrink: 0;
+}
+.tab-btn {
+  background: var(--win-gray);
+  border: 0;
+  padding: 4px 14px 3px;
+  font-family: var(--font);
+  font-size: var(--font-sz);
+  cursor: pointer;
+  margin-right: 2px;
+  position: relative;
+  box-shadow:
+    inset -1px 0 0 var(--win-darker),
+    inset  1px 1px 0 var(--win-light),
+    inset -2px 0 0 var(--win-dark),
+    inset  2px 2px 0 var(--win-lighter);
+}
+.tab-btn.active {
+  padding-bottom: 5px;
+  background: var(--win-gray);
+  z-index: 2;
+  box-shadow:
+    inset -1px 0 0 var(--win-darker),
+    inset  1px 1px 0 var(--win-light),
+    inset -2px 0 0 var(--win-dark),
+    inset  2px 2px 0 var(--win-lighter);
+}
+.tab-border {
+  height: 2px;
+  background: var(--win-gray);
+  box-shadow: inset 0 1px 0 var(--win-dark);
+  flex-shrink: 0;
+}
+
+/* ── Content body ─────────────────────────────────────────────────────────── */
+.window-body {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.tab-pane { display: none; flex: 1; overflow: hidden; flex-direction: column; padding: 8px 10px; }
+.tab-pane.active { display: flex; }
+
+/* ── Buttons ──────────────────────────────────────────────────────────────── */
+button.btn {
+  background: var(--win-gray);
+  border: 0;
+  padding: 4px 14px;
+  font-family: var(--font);
+  font-size: var(--font-sz);
+  cursor: pointer;
+  min-width: 75px;
+  height: 23px;
+  white-space: nowrap;
+  box-shadow:
+    inset -1px -1px 0 var(--win-darker),
+    inset  1px  1px 0 var(--win-light),
+    inset -2px -2px 0 var(--win-dark),
+    inset  2px  2px 0 var(--win-lighter);
+}
+button.btn:active:not(:disabled) {
+  box-shadow:
+    inset  1px  1px 0 var(--win-darker),
+    inset -1px -1px 0 var(--win-light),
+    inset  2px  2px 0 var(--win-dark),
+    inset -2px -2px 0 var(--win-lighter);
+  padding: 5px 13px 3px 15px;
+}
+button.btn:disabled {
+  color: var(--win-dark);
+  text-shadow: 1px 1px 0 var(--win-lighter);
+  cursor: default;
+}
+button.btn:focus { outline: 1px dotted var(--win-text); outline-offset: -4px; }
+
+/* ── Form inputs ──────────────────────────────────────────────────────────── */
+.form-group { display: flex; flex-direction: column; margin-bottom: 6px; }
+.form-group label { margin-bottom: 2px; }
+.form-control {
+  background: #fff;
+  border: 0;
+  padding: 3px 5px;
+  font-family: var(--font);
+  font-size: var(--font-sz);
+  outline: none;
+  user-select: text;
+  width: 100%;
+  box-shadow:
+    inset  1px  1px 0 var(--win-darker),
+    inset -1px -1px 0 var(--win-light),
+    inset  2px  2px 0 var(--win-dark),
+    inset -2px -2px 0 var(--win-lighter);
+}
+.form-control:focus {
+  box-shadow:
+    inset  1px  1px 0 var(--win-darker),
+    inset -1px -1px 0 var(--win-light),
+    inset  2px  2px 0 var(--win-dark),
+    inset -2px -2px 0 var(--win-lighter);
+}
+.input-group { display: flex; gap: 4px; }
+.input-group .form-control { flex: 1; }
+
+/* ── Checkbox ─────────────────────────────────────────────────────────────── */
+.form-check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.form-check input[type=checkbox] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 13px; height: 13px;
+  background: #fff;
+  border: 0;
+  flex-shrink: 0;
+  cursor: pointer;
+  position: relative;
+  box-shadow:
+    inset  1px  1px 0 var(--win-darker),
+    inset -1px -1px 0 var(--win-light),
+    inset  2px  2px 0 var(--win-dark),
+    inset -2px -2px 0 var(--win-lighter);
+}
+.form-check input[type=checkbox]:checked::after {
+  content: '✓';
+  position: absolute;
+  top: -3px; left: 0;
+  font-size: 13px;
+  color: var(--win-text);
+  font-weight: bold;
+}
+
+/* ── Radio ────────────────────────────────────────────────────────────────── */
+.form-check input[type=radio] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 13px; height: 13px;
+  background: #fff;
+  border: 0;
+  border-radius: 50%;
+  flex-shrink: 0;
+  cursor: pointer;
+  position: relative;
+  box-shadow:
+    inset  1px  1px 0 var(--win-darker),
+    inset -1px -1px 0 var(--win-light),
+    inset  2px  2px 0 var(--win-dark);
+}
+.form-check input[type=radio]:checked::after {
+  content: '';
+  position: absolute;
+  width: 5px; height: 5px;
+  background: var(--win-text);
+  border-radius: 50%;
+  top: 4px; left: 4px;
+}
+
+/* ── Fieldset / Group box ─────────────────────────────────────────────────── */
+fieldset {
+  border: 0;
+  padding: 0 8px 8px;
+  margin-bottom: 8px;
+  box-shadow:
+    inset  1px  1px 0 var(--win-darker),
+    inset -1px -1px 0 var(--win-light);
+}
+fieldset legend {
+  padding: 0 4px;
+  font-size: var(--font-sz);
+  background: var(--win-gray);
+}
+
+/* ── Slider ───────────────────────────────────────────────────────────────── */
+input[type=range] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  background: transparent;
+  cursor: pointer;
+  flex: 1;
+  padding: 0;
+  outline: none;
+}
+input[type=range]::-webkit-slider-runnable-track {
+  height: 4px;
+  background: #fff;
+  box-shadow:
+    inset 1px 1px 0 var(--win-darker),
+    inset -1px -1px 0 var(--win-light),
+    inset 2px 2px 0 var(--win-dark);
+}
+input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 11px; height: 21px;
+  background: var(--win-gray);
+  margin-top: -9px;
+  box-shadow:
+    inset -1px -1px 0 var(--win-darker),
+    inset  1px  1px 0 var(--win-light),
+    inset -2px -2px 0 var(--win-dark),
+    inset  2px  2px 0 var(--win-lighter);
+}
+
+/* ── Separator ────────────────────────────────────────────────────────────── */
+hr.separator {
+  border: 0;
+  height: 0;
+  border-top: 1px solid var(--win-dark);
+  border-bottom: 1px solid var(--win-lighter);
+  margin: 6px 0;
+}
+
+/* ── Progress bar ─────────────────────────────────────────────────────────── */
+.progress-wrap {
+  background: #fff;
+  height: 18px;
+  box-shadow:
+    inset  1px  1px 0 var(--win-darker),
+    inset -1px -1px 0 var(--win-light),
+    inset  2px  2px 0 var(--win-dark),
+    inset -2px -2px 0 var(--win-lighter);
+  overflow: hidden;
+  position: relative;
+}
+.progress-fill {
+  height: 100%;
+  background: var(--win-blue);
+  width: 0%;
+  transition: width 0.15s linear;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+}
+.progress-fill .progress-blocks {
+  display: flex;
+  gap: 2px;
+  padding: 0 2px;
+}
+.progress-fill .progress-blocks span {
+  display: inline-block;
+  width: 8px; height: 12px;
+  background: #fff;
+  flex-shrink: 0;
+}
+.progress-label {
+  position: absolute;
+  right: 4px; top: 50%;
+  transform: translateY(-50%);
+  font-size: 10px;
+  color: var(--win-text);
+  mix-blend-mode: difference;
+  color: #fff;
+  pointer-events: none;
+}
+.progress-pulse .progress-fill {
+  background: repeating-linear-gradient(
+    to right,
+    var(--win-blue) 0px,
+    var(--win-blue) 12px,
+    #4040b0 12px,
+    #4040b0 14px
+  );
+  background-size: 200% 100%;
+  animation: pulse-move 1s linear infinite;
+  width: 40% !important;
+  margin-left: 0;
+  animation: pulse-scroll 1.2s ease-in-out infinite alternate;
+}
+@keyframes pulse-scroll {
+  from { margin-left: 0%; }
+  to   { margin-left: 60%; }
+}
+
+/* ── Log / Terminal ───────────────────────────────────────────────────────── */
+.log-wrap {
+  flex: 1;
+  background: #000;
+  padding: 4px 6px;
+  overflow-y: auto;
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  box-shadow:
+    inset  1px  1px 0 var(--win-darker),
+    inset -1px -1px 0 var(--win-light),
+    inset  2px  2px 0 var(--win-dark),
+    inset -2px -2px 0 var(--win-lighter);
+  user-select: text;
+  min-height: 0;
+}
+.log-line { white-space: pre-wrap; word-break: break-all; }
+.log-ok     { color: #ffffff; }
+.log-bright { color: #ffffff; font-weight: bold; }
+.log-dim    { color: #808080; }
+.log-warn   { color: #ffff00; }
+.log-err    { color: #ff4444; }
+.log-info   { color: #00ffff; }
+.log-cursor { display: inline-block; width: 8px; height: 13px; background: #fff; vertical-align: text-bottom; animation: blink .6s step-end infinite; }
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+
+/* ── Provider chain ───────────────────────────────────────────────────────── */
+.provider-chain {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 6px;
+  background: var(--win-gray);
+  font-size: 10px;
+  box-shadow: inset 1px 1px 0 var(--win-darker), inset -1px -1px 0 var(--win-light);
+  flex-shrink: 0;
+}
+.provider-item { display: flex; align-items: center; gap: 4px; }
+.provider-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--win-dark);
+  flex-shrink: 0;
+  transition: background 0.2s;
+}
+.provider-dot.idle    { background: var(--win-dark); }
+.provider-dot.active  { background: #ffb000; box-shadow: 0 0 4px #ffb000; }
+.provider-dot.ok      { background: #00aa00; }
+.provider-dot.fail    { background: #cc0000; }
+.provider-dot.skip    { background: var(--win-dark); opacity: 0.4; }
+
+/* ── Status bar ───────────────────────────────────────────────────────────── */
+.status-bar {
+  display: flex;
+  gap: 4px;
+  padding: 3px 4px;
+  background: var(--win-gray);
+  font-size: 10px;
+  flex-shrink: 0;
+  border-top: 1px solid var(--win-dark);
+}
+.status-field {
+  padding: 1px 5px;
+  flex: 1;
+  box-shadow: inset 1px 1px 0 var(--win-darker), inset -1px -1px 0 var(--win-light);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Scrollbar ────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 16px; }
+::-webkit-scrollbar-track { background: var(--win-gray); box-shadow: inset 1px 1px 0 var(--win-dark); }
+::-webkit-scrollbar-thumb { background: var(--win-gray); box-shadow: inset -1px -1px 0 var(--win-darker), inset 1px 1px 0 var(--win-light), inset -2px -2px 0 var(--win-dark), inset 2px 2px 0 var(--win-lighter); }
+::-webkit-scrollbar-button { display: block; height: 16px; background: var(--win-gray); box-shadow: inset -1px -1px 0 var(--win-darker), inset 1px 1px 0 var(--win-light), inset -2px -2px 0 var(--win-dark), inset 2px 2px 0 var(--win-lighter); }
+
+/* ── Settings specific ────────────────────────────────────────────────────── */
+.settings-scroll { flex: 1; overflow-y: auto; padding-right: 4px; }
+.section-title {
+  font-weight: bold;
+  margin-bottom: 6px;
+  margin-top: 2px;
+  background: var(--win-blue);
+  color: #fff;
+  padding: 1px 6px;
+}
+.inline-row { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+.inline-row .form-check { margin-right: 16px; }
+
+.privacy-box {
+  background: #fff;
+  padding: 6px 8px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: #333;
+  box-shadow:
+    inset  1px  1px 0 var(--win-darker),
+    inset -1px -1px 0 var(--win-light),
+    inset  2px  2px 0 var(--win-dark);
+}
+.privacy-box b { color: var(--win-blue); }
+
+.test-result { padding: 2px 0; font-size: 11px; min-height: 16px; }
+.test-result.ok  { color: green; }
+.test-result.err { color: red; }
+
+/* ── Misc ─────────────────────────────────────────────────────────────────── */
+.flex-row { display: flex; gap: 6px; align-items: center; }
+.spacer   { flex: 1; }
+.mt4 { margin-top: 4px; }
+.mt6 { margin-top: 6px; }
+.label-sm { font-size: 10px; color: var(--win-dark); }
+
+/* ── Swiss flag icon (inline SVG) ─────────────────────────────────────────── */
+.swiss-icon { width:16px; height:16px; flex-shrink:0; }
+</style>
+</head>
+<body>
+
+<div class="window" id="mainWindow">
+
+  <!-- Title Bar -->
+  <div class="title-bar" id="titleBar">
+    <svg class="swiss-icon title-bar-icon" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+      <rect width="16" height="16" fill="#d00"/>
+      <rect x="6" y="2" width="4" height="12" fill="#fff"/>
+      <rect x="2" y="6" width="12" height="4" fill="#fff"/>
+    </svg>
+    <div class="title-bar-text">Kokin's Swiss Downloader</div>
+    <div class="title-bar-controls">
+      <button onclick="api('minimize_window')" title="Minimize">─</button>
+      <button onclick="api('close_window')"   title="Close">✕</button>
+    </div>
+  </div>
+
+  <!-- Tab Strip -->
+  <div class="tab-strip">
+    <button class="tab-btn active" id="tab-download" onclick="switchTab('download')">Download</button>
+    <button class="tab-btn"        id="tab-settings" onclick="switchTab('settings')">Settings</button>
+  </div>
+  <div class="tab-border"></div>
+
+  <!-- Update Banner (hidden until an update is found) -->
+  <div id="updateBanner" style="display:none;background:#ffffa0;padding:3px 8px;font-size:11px;flex-shrink:0;align-items:center;gap:6px;border-bottom:1px solid #808080;">
+    <span>&#11088; Update available: v<span id="bannerVersion"></span></span>
+    <button class="btn" onclick="showChangelog()" style="min-width:0;padding:1px 8px;height:18px;font-size:10px">What's new</button>
+    <button class="btn" onclick="openUpdate()" style="min-width:0;padding:1px 8px;height:18px;font-size:10px;font-weight:bold">Download</button>
+    <span style="flex:1"></span>
+    <button onclick="document.getElementById('updateBanner').style.display='none'" style="background:none;border:none;cursor:pointer;font-size:12px;padding:0 2px;line-height:1">✕</button>
+  </div>
+
+  <!-- Window Body -->
+  <div class="window-body">
+
+    <!-- ── DOWNLOAD TAB ──────────────────────────────────────────────────── -->
+    <div class="tab-pane active" id="pane-download">
+
+      <div class="form-group">
+        <label>URL <span class="label-sm">(Spotify · YouTube · SoundCloud · Bandcamp · …)</span></label>
+        <div class="input-group">
+          <input type="url" class="form-control" id="urlInput" placeholder="Paste a music URL here…" autocomplete="off" spellcheck="false">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Save to</label>
+        <div class="input-group">
+          <input type="text" class="form-control" id="outputDir" spellcheck="false">
+          <button class="btn" onclick="browseFolder()" style="min-width:70px">Browse…</button>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>FLAC compression &nbsp;<span class="label-sm" id="qualityLabel">0 — fastest / largest file</span></label>
+        <div style="display:flex;align-items:center;gap:6px;margin-top:2px">
+          <span class="label-sm" style="flex-shrink:0">0</span>
+          <input type="range" id="qualitySlider" min="0" max="9" value="0"
+                 oninput="updateQualityLabel(this.value)" style="flex:1;margin:0">
+          <span class="label-sm" style="flex-shrink:0">9</span>
+        </div>
+      </div>
+
+      <div class="flex-row mt4" style="gap:20px">
+        <label class="form-check">
+          <input type="checkbox" id="keepOriginal"> Keep original file
+        </label>
+        <label class="form-check">
+          <input type="checkbox" id="listFormats"> List formats only (no download)
+        </label>
+      </div>
+
+      <hr class="separator" style="margin-top:8px">
+
+      <div class="flex-row mt4">
+        <button class="btn" id="btnDownload" onclick="startDownload()" style="min-width:90px;font-weight:bold">Download</button>
+        <button class="btn" id="btnAbort"    onclick="abortDownload()" disabled>Abort</button>
+        <button class="btn" id="btnClear"    onclick="clearLog()">Clear Log</button>
+      </div>
+
+      <hr class="separator">
+
+      <!-- Provider chain -->
+      <div class="provider-chain">
+        <span style="color:var(--win-dark)">Providers:</span>
+        <div class="provider-item"><div class="provider-dot idle" id="dot-ytdlp"></div><span>yt-dlp</span></div>
+        <div class="provider-item"><div class="provider-dot idle" id="dot-odesli"></div><span>Odesli</span></div>
+        <div class="provider-item"><div class="provider-dot idle" id="dot-proxy"></div><span>Proxy</span></div>
+        <div class="provider-item"><div class="provider-dot idle" id="dot-musicbrainz"></div><span>MusicBrainz</span></div>
+      </div>
+
+      <!-- Log -->
+      <div class="log-wrap" id="logWrap" style="margin-top:4px">
+        <span id="logContent"></span><span class="log-cursor"></span>
+      </div>
+
+      <!-- Progress -->
+      <div style="margin-top:6px;flex-shrink:0">
+        <div class="progress-wrap" id="progressWrap">
+          <div class="progress-fill" id="progressFill"></div>
+          <span class="progress-label" id="progressLabel">0%</span>
+        </div>
+      </div>
+
+    </div><!-- /pane-download -->
+
+    <!-- ── SETTINGS TAB ──────────────────────────────────────────────────── -->
+    <div class="tab-pane" id="pane-settings">
+      <div class="settings-scroll">
+
+        <div class="section-title">SpotiFlac Integration</div>
+        <div id="spotiflacNote" class="label-sm mt4" style="margin-bottom:6px"></div>
+        <div class="privacy-box mt4" style="line-height:1.6">
+          Anonymous proxy services are read from <b>~/.spotiflac/</b> and used
+          automatically when DRM is detected. <b>No Qobuz account is required.</b>
+        </div>
+        <div id="spotiflacSvcs" class="label-sm mt4" style="line-height:1.8"></div>
+
+        <hr class="separator">
+        <div class="section-title">Download Quality</div>
+
+        <div class="inline-row mt4">
+          <label class="form-check"><input type="radio" name="fmt" value="6"  checked> 16-bit FLAC <span class="label-sm">(CD quality)</span></label>
+          <label class="form-check"><input type="radio" name="fmt" value="7">  24-bit / 96 kHz</label>
+          <label class="form-check"><input type="radio" name="fmt" value="27"> 24-bit / 192 kHz</label>
+        </div>
+
+        <div class="mt6">
+          <label class="form-check">
+            <input type="checkbox" id="sAutoFallback" checked>
+            Auto-activate fallback chain on DRM error
+          </label>
+        </div>
+
+        <hr class="separator">
+        <div class="section-title">Network &amp; Privacy</div>
+
+        <div class="form-group mt4">
+          <label>Proxy URL <span class="label-sm">(optional — routes ALL traffic)</span></label>
+          <input type="text" class="form-control" id="sProxy" placeholder="http://127.0.0.1:8080  or  socks5://…" spellcheck="false">
+        </div>
+
+        <div class="privacy-box mt4">
+          <b>What leaves your machine:</b><br>
+          &nbsp;• <b>Odesli</b> (api.odesli.co) — source URL, only when DRM fallback triggers<br>
+          &nbsp;• <b>Proxy services</b> — numeric Qobuz track ID only, when DRM fallback triggers<br>
+          &nbsp;• <b>MusicBrainz</b> — title + artist for ISRC lookup only<br>
+          &nbsp;• <b>yt-dlp</b> — requests go directly to the source site<br><br>
+          All connections use <b>HTTPS</b>. <b>No account credentials are required or stored.</b><br>
+          No analytics or telemetry is collected by this app.
+        </div>
+
+        <hr class="separator">
+        <div class="flex-row mt4">
+          <button class="btn" onclick="saveSettings()" style="font-weight:bold;min-width:100px">Save</button>
+          <span id="saveResult" class="label-sm" style="margin-left:8px"></span>
+        </div>
+
+        <hr class="separator">
+        <div class="section-title">About</div>
+        <div class="mt4 label-sm" style="line-height:1.9">
+          Kokin's Swiss Downloader &nbsp;•&nbsp; v<span id="appVersion">—</span><br>
+          <span id="updateStatus" style="color:var(--win-dark)">—</span>
+        </div>
+        <div id="changelogBox" style="display:none;margin-top:8px">
+          <div class="section-title" style="background:#006600">
+            What's new in v<span id="changelogVersion"></span>
+          </div>
+          <pre id="changelogText" style="
+            background:#fff;padding:6px 8px;font-size:10px;line-height:1.55;
+            white-space:pre-wrap;word-break:break-word;
+            max-height:160px;overflow-y:auto;
+            box-shadow:inset 1px 1px 0 #0a0a0a,inset -1px -1px 0 #fff,
+                       inset 2px 2px 0 #808080,inset -2px -2px 0 #dfdfdf;
+            font-family:'Courier New',monospace;"></pre>
+          <div class="flex-row mt4">
+            <button class="btn" onclick="openUpdate()" style="font-weight:bold">Download v<span id="changelogDlVersion"></span></button>
+            <button class="btn" onclick="document.getElementById('changelogBox').style.display='none'">Close</button>
+          </div>
+        </div>
+
+      </div>
+    </div><!-- /pane-settings -->
+
+  </div><!-- /window-body -->
+
+  <!-- Status Bar -->
+  <div class="status-bar">
+    <div class="status-field" id="statusText">Ready</div>
+    <div class="status-field" style="flex:0 0 auto;min-width:220px;text-align:right">
+      ⚠ For legal use only — respect copyright law
+    </div>
+  </div>
+
+</div><!-- /window -->
+
+<script>
+// ── Helpers ──────────────────────────────────────────────────────────────────
+function api(method, ...args) {
+  return window.pywebview.api[method](...args);
+}
+
+// ── Tab switching ─────────────────────────────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  document.getElementById('pane-' + name).classList.add('active');
+}
+
+// ── Quality label ─────────────────────────────────────────────────────────────
+const QUALITY_LABELS = {
+  '0':'0 (fastest / largest file)', '1':'1', '2':'2', '3':'3', '4':'4',
+  '5':'5 (balanced)', '6':'6', '7':'7', '8':'8', '9':'9 (smallest / slowest)',
+};
+function updateQualityLabel(v) {
+  document.getElementById('qualityLabel').textContent = QUALITY_LABELS[v] || v;
+}
+
+// ── Log ───────────────────────────────────────────────────────────────────────
+function appendLog(msg, level) {
+  const el = document.getElementById('logContent');
+  const span = document.createElement('span');
+  span.className = 'log-line log-' + (level || 'ok');
+  span.textContent = '> ' + msg + '\n';
+  el.appendChild(span);
+  const wrap = document.getElementById('logWrap');
+  wrap.scrollTop = wrap.scrollHeight;
+}
+function clearLog() {
+  document.getElementById('logContent').innerHTML = '';
+  setProgress(0);
+  resetProviders();
+}
+
+// ── Progress ──────────────────────────────────────────────────────────────────
+function setProgress(pct) {
+  const wrap = document.getElementById('progressWrap');
+  const fill = document.getElementById('progressFill');
+  const lbl  = document.getElementById('progressLabel');
+  wrap.classList.remove('progress-pulse');
+  fill.style.width = Math.min(100, pct) + '%';
+  lbl.textContent  = pct.toFixed(1) + '%';
+}
+function pulseProgress() {
+  document.getElementById('progressWrap').classList.add('progress-pulse');
+  document.getElementById('progressFill').style.width = '';
+  document.getElementById('progressLabel').textContent = '…';
+}
+
+// ── Provider dots ─────────────────────────────────────────────────────────────
+function setProvider(key, state) {
+  const dot = document.getElementById('dot-' + key);
+  if (dot) {
+    dot.className = 'provider-dot ' + state;
+  }
+}
+function resetProviders() {
+  ['ytdlp','odesli','proxy','musicbrainz'].forEach(k => setProvider(k, 'idle'));
+}
+
+// ── Status bar ────────────────────────────────────────────────────────────────
+function setStatus(msg) {
+  document.getElementById('statusText').textContent = msg;
+}
+
+// ── Browse ────────────────────────────────────────────────────────────────────
+async function browseFolder() {
+  const folder = await api('browse_folder');
+  if (folder) document.getElementById('outputDir').value = folder;
+}
+
+// ── Download ──────────────────────────────────────────────────────────────────
+async function startDownload() {
+  const url    = document.getElementById('urlInput').value.trim();
+  const outDir = document.getElementById('outputDir').value.trim();
+  const qual   = parseInt(document.getElementById('qualitySlider').value, 10);
+  const keep   = document.getElementById('keepOriginal').checked;
+  const listFm = document.getElementById('listFormats').checked;
+
+  if (!url) { appendLog('No URL provided.', 'err'); return; }
+
+  const result = await api('start_download', url, outDir, qual, keep, listFm);
+  if (!result.ok) { appendLog(result.msg, 'err'); return; }
+
+  document.getElementById('btnDownload').disabled = true;
+  document.getElementById('btnAbort').disabled    = false;
+  resetProviders();
+  pulseProgress();
+  setStatus('Downloading…');
+  startPolling();
+}
+
+async function abortDownload() {
+  await api('abort_download');
+  setStatus('Aborting…');
+}
+
+// ── Polling ───────────────────────────────────────────────────────────────────
+let _pollTimer = null;
+function startPolling() {
+  if (_pollTimer) return;
+  _pollTimer = setInterval(pollUpdates, 180);
+}
+function stopPolling() {
+  if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+}
+async function pollUpdates() {
+  const updates = await api('poll_updates');
+  updates.forEach(u => {
+    if      (u.kind === 'log')            appendLog(u.msg, u.level);
+    else if (u.kind === 'progress')       setProgress(u.pct);
+    else if (u.kind === 'provider')       setProvider(u.key, u.state);
+    else if (u.kind === 'update_available') showUpdateBanner(u.version, u.notes, u.url);
+    else if (u.kind === 'done') {
+      stopPolling();
+      document.getElementById('btnDownload').disabled = false;
+      document.getElementById('btnAbort').disabled    = true;
+      setStatus('Ready');
+    }
+  });
+}
+
+// ── Updates ───────────────────────────────────────────────────────────────────
+let _updateUrl = '';
+
+function showUpdateBanner(version, notes, url) {
+  _updateUrl = url;
+  document.getElementById('bannerVersion').textContent  = version;
+  document.getElementById('updateBanner').style.display = 'flex';
+  // Also update the About section in Settings
+  document.getElementById('changelogVersion').textContent   = version;
+  document.getElementById('changelogDlVersion').textContent = version;
+  document.getElementById('changelogText').textContent      = notes || '(no release notes)';
+  const statusEl = document.getElementById('updateStatus');
+  statusEl.textContent = 'Update available: v' + version + ' — ';
+  const link = document.createElement('a');
+  link.href    = '#';
+  link.onclick = () => { showChangelog(); return false; };
+  link.style.color = 'darkblue';
+  link.textContent = 'see what\'s new';
+  statusEl.appendChild(link);
+}
+
+function showChangelog() {
+  document.getElementById('changelogBox').style.display = 'block';
+  switchTab('settings');
+  // Scroll to bottom of settings so changelog is visible
+  setTimeout(() => {
+    const s = document.querySelector('.settings-scroll');
+    if (s) s.scrollTop = s.scrollHeight;
+  }, 50);
+}
+
+function openUpdate() {
+  if (_updateUrl) window.open(_updateUrl, '_blank');
+}
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+async function saveSettings() {
+  const fmt = document.querySelector('input[name=fmt]:checked')?.value || '6';
+  const data = {
+    qobuzFormat:  parseInt(fmt, 10),
+    autoFallback: document.getElementById('sAutoFallback').checked,
+    proxy:        document.getElementById('sProxy').value.trim(),
+  };
+  const r = await api('save_settings', data);
+  const el = document.getElementById('saveResult');
+  el.textContent = r.msg;
+  el.style.color = r.ok ? 'green' : 'darkred';
+  setTimeout(() => { el.textContent = ''; }, 3000);
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+async function init() {
+  const d = await api('get_init_data');
+
+  document.getElementById('outputDir').value = d.defaultOutput;
+
+  // Settings tab pre-fill
+  document.getElementById('sAutoFallback').checked = d.autoFallback;
+  document.getElementById('sProxy').value          = d.proxy || '';
+  const fmtRadio = document.querySelector(`input[name=fmt][value="${d.qobuzFormat}"]`);
+  if (fmtRadio) fmtRadio.checked = true;
+
+  // SpotiFlac integration notice
+  const note = document.getElementById('spotiflacNote');
+  if (d.spotiflacFound) {
+    note.textContent = '✓ SpotiFlac found — proxy services available.';
+    note.style.color = 'green';
+  } else {
+    note.textContent = '⚠ ~/.spotiflac not found — proxy fallback unavailable.';
+    note.style.color = 'darkred';
+  }
+  const svcsEl = document.getElementById('spotiflacSvcs');
+  if (d.spotiflacSvcs && d.spotiflacSvcs.length) {
+    svcsEl.innerHTML = 'Services: ' + d.spotiflacSvcs.map(s =>
+      `<span style="margin-right:10px">• ${s}</span>`).join('');
+  }
+
+  // Version + update check
+  document.getElementById('appVersion').textContent = d.appVersion || '?';
+  const statusEl = document.getElementById('updateStatus');
+  if (d.updateConfigured) {
+    statusEl.textContent = 'Checking for updates…';
+    statusEl.style.color = 'var(--win-dark)';
+    api('check_for_updates');
+    // One-shot poll after 5s to catch the update result
+    setTimeout(pollUpdates, 5000);
+  } else {
+    statusEl.textContent = 'Update check not configured (set GITHUB_OWNER/REPO in version.py)';
+    statusEl.style.color = 'gray';
+  }
+
+  // Boot log
+  appendLog("Kokin's Swiss Downloader — ready.", 'bright');
+  appendLog('ffmpeg: ' + (d.ffmpegFound ? d.ffmpegPath : 'NOT FOUND — install ffmpeg and add to PATH'), d.ffmpegFound ? 'dim' : 'err');
+  appendLog('SpotiFlac: ' + (d.spotiflacFound ? 'proxies ready (' + (d.spotiflacSvcs||[]).join(', ') + ')' : 'not found — proxy fallback unavailable'), d.spotiflacFound ? 'dim' : 'warn');
+  appendLog('Fallback chain: yt-dlp → Odesli → Proxy → MusicBrainz', 'dim');
+  appendLog('Paste a URL above and click Download.', 'ok');
+  appendLog('⚠ Legal: only download content you own or have permission to copy.', 'warn');
+}
+
+// Wait for pywebview bridge to be ready
+window.addEventListener('pywebviewready', init);
+</script>
+</body>
+</html>

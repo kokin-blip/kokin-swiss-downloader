@@ -1,0 +1,9 @@
+# Ignore everything in the user home directory by default
+/*
+
+# Except the project and the readme
+!README.md
+!.gitignore
+!Documents/
+Documents/*
+!Documents/flac-downloader/

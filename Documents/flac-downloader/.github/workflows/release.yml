@@ -1,0 +1,43 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - "v*"          # triggers on any tag like v1.0.0, v1.2.3, etc.
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build exe
+        run: |
+          pyinstaller `
+            --onefile `
+            --windowed `
+            --name "Swiss Downloader" `
+            --add-data "ui;ui" `
+            --add-data "version.py;." `
+            --hidden-import "pywebview.platforms.winforms" `
+            --hidden-import "clr" `
+            app.py
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Swiss Downloader.exe
+          # The release body becomes the changelog shown in-app.
+          # Edit it on the GitHub Releases page after the tag is pushed.
