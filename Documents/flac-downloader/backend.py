@@ -229,7 +229,9 @@ class API:
                     "preferredquality": str(quality)}
 
         def make_opts(target_url):
-            tpl = str(Path(output_dir) / "%(artist|%(uploader)s)s - %(title)s.%(ext)s")
+            # %(artist,uploader)s = use the 'artist' field if present (Bandcamp, etc.),
+            # otherwise fall back to 'uploader' (YouTube channel name).
+            tpl = str(Path(output_dir) / "%(artist,uploader)s - %(title)s.%(ext)s")
             pps = [_audio_postproc()]
             if embed_meta:
                 pps.append({"key": "FFmpegMetadata", "add_metadata": True})
