@@ -17,7 +17,7 @@ except ImportError:
 import settings as cfg
 from providers import (OdesliResolver, QobuzAPI, SpotiflacProxy,
                        MusicBrainz, is_drm_error, extract_qobuz_id,
-                       fetch_spotify_metadata, fetch_itunes_cover_url,
+                       fetch_spotify_metadata, lookup_album_cover,
                        clean_url)
 from utils import find_ffmpeg, tag_flac_file, flac_cover_info
 from version import __version__, GITHUB_OWNER, GITHUB_REPO
@@ -294,17 +294,18 @@ class API:
                     else:
                         self._log("  Primary cover fetch failed.", "warn")
 
-                # 2) iTunes fallback (album-cover-only — guaranteed not a video frame)
+                # 2) iTunes + Deezer fallback — both verify the result's artistName
+                # matches the query so we never embed a wrong-artist cover
                 if not cover_data and artist and title:
-                    self._log("  Looking up album cover on iTunes…", "dim")
-                    itunes_url = fetch_itunes_cover_url(artist, title, proxy=proxy)
-                    if itunes_url:
-                        self._log(f"  iTunes match: {itunes_url[:60]}…", "dim")
-                        cover_data, cover_mime = fetch_cover(itunes_url)
+                    self._log("  Looking up verified album cover (iTunes + Deezer)…", "dim")
+                    alt_url = lookup_album_cover(artist, title, proxy=proxy)
+                    if alt_url:
+                        self._log(f"  Match: {alt_url[:60]}…", "dim")
+                        cover_data, cover_mime = fetch_cover(alt_url)
                         if cover_data:
-                            self._log(f"  iTunes cover fetched: {len(cover_data)} bytes", "dim")
+                            self._log(f"  Cover fetched: {len(cover_data)} bytes", "dim")
                     else:
-                        self._log("  No iTunes match for this track.", "warn")
+                        self._log("  No verified match for this artist + title.", "warn")
 
                 if not cover_data:
                     self._log("  No album cover available — file will have no thumbnail.", "warn")

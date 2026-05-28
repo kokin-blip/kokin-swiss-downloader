@@ -14,7 +14,7 @@ from pathlib import Path
 # Make sibling modules importable when run from anywhere
 sys.path.insert(0, str(Path(__file__).parent))
 
-from providers import fetch_itunes_cover_url
+from providers import lookup_album_cover
 from utils     import tag_flac_file, flac_cover_info
 
 
@@ -62,10 +62,10 @@ def process(folder: Path) -> None:
             if not (artist and title):
                 print("   filename isn't 'Artist - Title'; skipping iTunes lookup.")
                 continue
-            print(f"   iTunes lookup: {artist} — {title}")
-            url = fetch_itunes_cover_url(artist, title)
+            print(f"   Looking up cover (iTunes + Deezer, verified): {artist} - {title}")
+            url = lookup_album_cover(artist, title)
             if not url:
-                print("   no iTunes match.")
+                print("   no verified match found; skipping (will not embed wrong cover).")
                 continue
             data = fetch_bytes(url)
             if not data:

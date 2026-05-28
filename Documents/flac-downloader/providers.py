@@ -56,35 +56,87 @@ def extract_qobuz_id(url: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def _norm_for_match(s: str) -> str:
+    """Lowercase, strip whitespace/punctuation — for fuzzy artist comparison."""
+    return re.sub(r'[^a-z0-9]', '', (s or "").lower())
+
+
+def _artist_matches(query_artist: str, candidate_artist: str) -> bool:
+    """
+    True if the candidate's artist name plausibly matches the query.
+    Accepts substring matches in either direction so 'lucki' matches
+    'LUCKI', 'A Boogie Wit da Hoodie' matches 'A Boogie wit da Hoodie',
+    etc. — but rejects unrelated artists like 'Bob Dylan' for 'LUCKI'.
+    """
+    q = _norm_for_match(query_artist)
+    c = _norm_for_match(candidate_artist)
+    if not q or not c:
+        return False
+    return q in c or c in q
+
+
 def fetch_itunes_cover_url(artist: str, title: str,
                            proxy: Optional[str] = None) -> Optional[str]:
     """
-    Search iTunes for the song and return the URL of the album cover (front).
-    No auth required. iTunes serves album art only — never artist photos or
-    video thumbnails — so this is a guaranteed "album cover only" source.
-
-    Returns a high-res (1000x1000) JPEG URL on success, or None.
+    Search iTunes for the song and return the album-cover URL ONLY if the
+    matching result's artistName actually matches the requested artist.
+    This prevents iTunes returning a wrong-artist match (e.g. Bob Dylan
+    for an underground rapper iTunes doesn't carry) from poisoning our
+    cover art.
     """
     if not (artist and title):
         return None
     q = urllib.parse.urlencode({
         "term":   f"{artist} {title}",
         "entity": "song",
-        "limit":  1,
+        "limit":  10,
         "media":  "music",
     })
     try:
         data = _get(f"https://itunes.apple.com/search?{q}", proxy=proxy)
     except Exception:
         return None
-    results = data.get("results", [])
-    if not results:
+    for r in data.get("results", []):
+        if _artist_matches(artist, r.get("artistName", "")):
+            art = r.get("artworkUrl100", "")
+            if art:
+                return art.replace("100x100", "1000x1000")
+    return None
+
+
+def fetch_deezer_cover_url(artist: str, title: str,
+                           proxy: Optional[str] = None) -> Optional[str]:
+    """
+    Search Deezer for the song and return the verified album cover URL.
+    Deezer has substantially better coverage of underground / hip-hop /
+    indie catalogs than iTunes, so this picks up many tracks iTunes misses.
+    No auth required.
+    """
+    if not (artist and title):
         return None
-    art = results[0].get("artworkUrl100", "")
-    if not art:
+    q = urllib.parse.urlencode({"q": f'artist:"{artist}" track:"{title}"'})
+    try:
+        data = _get(f"https://api.deezer.com/search?{q}&limit=10", proxy=proxy)
+    except Exception:
         return None
-    # iTunes URL convention: replace the size in path for higher-res
-    return art.replace("100x100", "1000x1000")
+    for r in data.get("data", []):
+        cand = (r.get("artist") or {}).get("name", "")
+        if _artist_matches(artist, cand):
+            alb = r.get("album") or {}
+            # Deezer covers: cover_xl=1000, cover_big=500, cover_medium=250
+            return alb.get("cover_xl") or alb.get("cover_big") or alb.get("cover")
+    return None
+
+
+def lookup_album_cover(artist: str, title: str,
+                       proxy: Optional[str] = None) -> Optional[str]:
+    """
+    Try iTunes first, then Deezer. Returns a verified album-cover URL or None.
+    'Verified' means the source's artist name matches the query artist —
+    never returns a wrong-artist match.
+    """
+    return (fetch_itunes_cover_url(artist, title, proxy=proxy)
+            or fetch_deezer_cover_url(artist, title, proxy=proxy))
 
 
 def clean_url(url: str) -> str:
