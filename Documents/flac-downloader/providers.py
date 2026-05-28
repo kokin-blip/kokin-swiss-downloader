@@ -56,6 +56,37 @@ def extract_qobuz_id(url: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def fetch_itunes_cover_url(artist: str, title: str,
+                           proxy: Optional[str] = None) -> Optional[str]:
+    """
+    Search iTunes for the song and return the URL of the album cover (front).
+    No auth required. iTunes serves album art only — never artist photos or
+    video thumbnails — so this is a guaranteed "album cover only" source.
+
+    Returns a high-res (1000x1000) JPEG URL on success, or None.
+    """
+    if not (artist and title):
+        return None
+    q = urllib.parse.urlencode({
+        "term":   f"{artist} {title}",
+        "entity": "song",
+        "limit":  1,
+        "media":  "music",
+    })
+    try:
+        data = _get(f"https://itunes.apple.com/search?{q}", proxy=proxy)
+    except Exception:
+        return None
+    results = data.get("results", [])
+    if not results:
+        return None
+    art = results[0].get("artworkUrl100", "")
+    if not art:
+        return None
+    # iTunes URL convention: replace the size in path for higher-res
+    return art.replace("100x100", "1000x1000")
+
+
 def clean_url(url: str) -> str:
     """Strip tracking params like Spotify's ?si=... that confuse some APIs."""
     return re.sub(r'\?(si|igsh|utm_[^=]+|fbclid)=[^&]*(&|$)', '', url).rstrip('?&')

@@ -66,6 +66,36 @@ def app_data_dir() -> Path:
     return d
 
 
+def flac_cover_info(path: Path) -> dict:
+    """
+    Read back a FLAC file and report whether it has a valid PICTURE block.
+    Used after tagging to confirm the cover actually landed in the file.
+
+    Returns:
+      {"present": True, "count": int, "size": int, "width": int, "height": int,
+       "type": int, "mime": str}
+      or
+      {"present": False, "reason": str}
+    """
+    try:
+        from mutagen.flac import FLAC
+        audio = FLAC(str(path))
+        if not audio.pictures:
+            return {"present": False, "reason": "no PICTURE block"}
+        pic = audio.pictures[0]
+        return {
+            "present": True,
+            "count":   len(audio.pictures),
+            "size":    len(pic.data),
+            "width":   pic.width,
+            "height":  pic.height,
+            "type":    pic.type,
+            "mime":    pic.mime,
+        }
+    except Exception as e:
+        return {"present": False, "reason": str(e)}
+
+
 def _normalize_cover(data: bytes) -> tuple[bytes, str, int, int]:
     """
     Decode cover image with Pillow, re-encode as JPEG, return

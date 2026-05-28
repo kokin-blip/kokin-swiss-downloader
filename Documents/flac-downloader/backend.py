@@ -17,8 +17,9 @@ except ImportError:
 import settings as cfg
 from providers import (OdesliResolver, QobuzAPI, SpotiflacProxy,
                        MusicBrainz, is_drm_error, extract_qobuz_id,
-                       fetch_spotify_metadata, clean_url)
-from utils import find_ffmpeg, tag_flac_file
+                       fetch_spotify_metadata, fetch_itunes_cover_url,
+                       clean_url)
+from utils import find_ffmpeg, tag_flac_file, flac_cover_info
 from version import __version__, GITHUB_OWNER, GITHUB_REPO
 
 DEFAULT_OUT       = str(Path.home() / "Music"  / "Swiss Downloads")
@@ -266,30 +267,92 @@ class API:
                 return None, None
 
         def tag_proxy_file(out_file: Path, track_info: dict):
-            """Tag a proxy-downloaded FLAC with metadata + optional cover art."""
+            """
+            Tag a downloaded FLAC with album metadata + cover art.
+            Source priority for the cover: primary URL (Spotify/Qobuz) → iTunes
+            album-cover lookup as fallback.  Also drops a same-name sidecar JPG
+            and folder.jpg as backups for Windows Explorer thumbnails (which are
+            unreliable for FLAC files even when art is properly embedded).
+            """
             if not (embed_meta or embed_thumb):
-                return
+                return out_file
+
+            artist = (track_info.get("performer") or {}).get("name", "")
+            title  = track_info.get("title", "")
+
             cover_data, cover_mime = None, "image/jpeg"
+
             if embed_thumb:
-                cover_url = ((track_info.get("album") or {})
-                             .get("image", {}).get("large", ""))
-                cover_data, cover_mime = fetch_cover(cover_url)
+                # 1) Primary cover URL (already in track_info if scraping worked)
+                cover_url = (track_info.get("album") or {}) \
+                                .get("image", {}).get("large", "")
+                if cover_url:
+                    self._log(f"  Fetching album cover from {cover_url[:60]}…", "dim")
+                    cover_data, cover_mime = fetch_cover(cover_url)
+                    if cover_data:
+                        self._log(f"  Cover fetched: {len(cover_data)} bytes ({cover_mime})", "dim")
+                    else:
+                        self._log("  Primary cover fetch failed.", "warn")
+
+                # 2) iTunes fallback (album-cover-only — guaranteed not a video frame)
+                if not cover_data and artist and title:
+                    self._log("  Looking up album cover on iTunes…", "dim")
+                    itunes_url = fetch_itunes_cover_url(artist, title, proxy=proxy)
+                    if itunes_url:
+                        self._log(f"  iTunes match: {itunes_url[:60]}…", "dim")
+                        cover_data, cover_mime = fetch_cover(itunes_url)
+                        if cover_data:
+                            self._log(f"  iTunes cover fetched: {len(cover_data)} bytes", "dim")
+                    else:
+                        self._log("  No iTunes match for this track.", "warn")
+
+                if not cover_data:
+                    self._log("  No album cover available — file will have no thumbnail.", "warn")
+
+            # Write FLAC tags + embedded picture
             tag_flac_file(out_file,
                           track_info if embed_meta else {},
                           cover_data, cover_mime or "image/jpeg")
-            if embed_meta:
-                artist = (track_info.get("performer") or {}).get("name", "")
-                title  = track_info.get("title", "")
-                if artist and title:
-                    import re as _re
-                    safe = _re.sub(r'[<>:"/\\|?*]', "_", f"{artist} - {title}")
-                    renamed = out_file.parent / f"{safe}{out_file.suffix}"
-                    try:
+
+            # Rename to clean "Artist - Title.flac" if we have both
+            final = out_file
+            if embed_meta and artist and title:
+                import re as _re
+                safe    = _re.sub(r'[<>:"/\\|?*]', "_", f"{artist} - {title}")
+                renamed = out_file.parent / f"{safe}{out_file.suffix}"
+                try:
+                    if out_file != renamed:
+                        if renamed.exists():
+                            renamed.unlink()
                         out_file.rename(renamed)
-                        return renamed
-                    except Exception:
-                        pass
-            return out_file
+                    final = renamed
+                except Exception:
+                    pass
+
+            # Sidecar JPGs — Windows Explorer fallback when FLAC art doesn't render
+            if cover_data and final.suffix.lower() == ".flac":
+                try:
+                    sidecar = final.with_suffix(".jpg")
+                    sidecar.write_bytes(cover_data)
+                except Exception:
+                    pass
+                try:
+                    # folder.jpg makes the *folder* show the album cover in Explorer
+                    (final.parent / "folder.jpg").write_bytes(cover_data)
+                except Exception:
+                    pass
+
+            # Verify the embed actually landed in the file
+            if final.suffix.lower() == ".flac":
+                info = flac_cover_info(final)
+                if info.get("present"):
+                    self._log(
+                        f"  ✓ Cover embedded: {info['width']}×{info['height']}, "
+                        f"{info['size']} bytes, {info['mime']}", "dim")
+                else:
+                    self._log(f"  ⚠ No cover in final file ({info.get('reason','unknown')})", "warn")
+
+            return final
 
         try:
             Path(output_dir).mkdir(parents=True, exist_ok=True)
