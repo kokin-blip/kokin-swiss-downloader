@@ -139,6 +139,95 @@ def lookup_album_cover(artist: str, title: str,
             or fetch_deezer_cover_url(artist, title, proxy=proxy))
 
 
+def is_album_or_playlist_url(url: str) -> bool:
+    """True if the URL is an album / playlist / set rather than a single track."""
+    url = (url or "").lower()
+    return any(p in url for p in (
+        "open.spotify.com/album/",
+        "open.spotify.com/playlist/",
+        "youtube.com/playlist",
+        "youtu.be/playlist",
+        "music.youtube.com/playlist",
+        "bandcamp.com/album/",
+        "/sets/",                    # SoundCloud sets
+        "music.apple.com/" + ""      # plus "/album/" check below
+    )) or ("music.apple.com" in url and "/album/" in url and "?i=" not in url)
+
+
+def fetch_spotify_album_tracks(url: str,
+                               proxy: Optional[str] = None) -> list[dict]:
+    """
+    Scrape track entries from an open.spotify.com album OR playlist page.
+    Returns a list of {"url": str, "title": str, "artist": str} dicts.
+    Reads JSON-LD MusicAlbum.track / MusicPlaylist.track when present,
+    falling back to all '/track/<id>' references in the HTML.
+    """
+    if not any(s in url for s in ("/album/", "/playlist/")):
+        return []
+    try:
+        req = urllib.request.Request(
+            clean_url(url),
+            headers={"User-Agent": _UA, "Accept-Language": "en-US,en;q=0.9"},
+        )
+        with _opener(proxy).open(req, timeout=15) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+    except Exception:
+        return []
+
+    tracks: list[dict] = []
+
+    # 1. JSON-LD MusicAlbum / MusicPlaylist
+    for blob in re.findall(
+            r'<script[^>]+type="application/ld\+json"[^>]*>(.+?)</script>',
+            html, re.DOTALL):
+        try:
+            data = json.loads(blob)
+        except Exception:
+            continue
+        if isinstance(data, list):
+            data = next((d for d in data if isinstance(d, dict)), {})
+        if not isinstance(data, dict):
+            continue
+        track_list = data.get("track") or data.get("tracks") or []
+        if isinstance(track_list, dict):
+            track_list = [track_list]
+        for t in track_list:
+            if not isinstance(t, dict):
+                continue
+            t_url = t.get("url", "") or t.get("@id", "")
+            if not t_url or "open.spotify.com/track/" not in t_url:
+                continue
+            ba = t.get("byArtist") or []
+            if isinstance(ba, dict):
+                t_artist = ba.get("name", "")
+            elif isinstance(ba, list) and ba:
+                t_artist = ", ".join(a.get("name", "") for a in ba if isinstance(a, dict)).strip(", ")
+            else:
+                t_artist = ""
+            tracks.append({
+                "url":    clean_url(t_url),
+                "title":  t.get("name", ""),
+                "artist": t_artist,
+            })
+        if tracks:
+            break
+
+    # 2. Fallback: pull unique track IDs out of the raw HTML
+    if not tracks:
+        ids = []
+        for tid in re.findall(r'/track/([A-Za-z0-9]{22})', html):
+            if tid not in ids:
+                ids.append(tid)
+        for tid in ids:
+            tracks.append({
+                "url":    f"https://open.spotify.com/track/{tid}",
+                "title":  "",
+                "artist": "",
+            })
+
+    return tracks
+
+
 def clean_url(url: str) -> str:
     """Strip tracking params like Spotify's ?si=... that confuse some APIs."""
     return re.sub(r'\?(si|igsh|utm_[^=]+|fbclid)=[^&]*(&|$)', '', url).rstrip('?&')

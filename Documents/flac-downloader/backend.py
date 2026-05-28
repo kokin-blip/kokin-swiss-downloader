@@ -18,6 +18,7 @@ import settings as cfg
 from providers import (OdesliResolver, QobuzAPI, SpotiflacProxy,
                        MusicBrainz, is_drm_error, extract_qobuz_id,
                        fetch_spotify_metadata, lookup_album_cover,
+                       fetch_spotify_album_tracks, is_album_or_playlist_url,
                        clean_url)
 from utils import find_ffmpeg, tag_flac_file, flac_cover_info
 from version import __version__, GITHUB_OWNER, GITHUB_REPO
@@ -28,10 +29,13 @@ DEFAULT_VIDEO_OUT = str(Path.home() / "Videos" / "Swiss Downloads")
 
 class API:
     def __init__(self):
-        self._window      = None
-        self._updates:  queue.Queue = queue.Queue()
-        self._downloading = False
-        self._abort_flag  = False
+        self._window          = None
+        self._updates: queue.Queue = queue.Queue()
+        self._downloading     = False
+        self._abort_flag      = False
+        # Synchronous-prompt support: worker thread blocks on _prompt_event until JS replies
+        self._prompt_event    = threading.Event()
+        self._prompt_response = True
 
     def set_window(self, window):
         self._window = window
@@ -151,6 +155,23 @@ class API:
         self._abort_flag = True
         return {"ok": True}
 
+    def prompt_response(self, answer: bool) -> dict:
+        """Called from JS to deliver the user's Yes/No answer to a pending prompt."""
+        self._prompt_response = bool(answer)
+        self._prompt_event.set()
+        return {"ok": True}
+
+    # ── Internal helpers for worker → UI prompts ─────────────────────────────
+
+    def _ask_user(self, question: str, default: bool = True, timeout: float = 120.0) -> bool:
+        """Block the worker thread until the UI returns a Yes/No answer."""
+        self._prompt_response = default
+        self._prompt_event.clear()
+        self._emit("prompt", question=question)
+        if not self._prompt_event.wait(timeout=timeout):
+            return default
+        return self._prompt_response
+
     def poll_updates(self) -> list:
         """Drain and return all pending UI updates for JS to process."""
         batch = []
@@ -169,14 +190,57 @@ class API:
     def _log(self, msg: str, level: str = "ok"):
         self._emit("log", msg=str(msg), level=level)
 
-    def _progress(self, pct: float):
-        self._emit("progress", pct=round(float(pct), 1))
+    def _progress(self, pct: float, speed: float = 0, eta: float = 0,
+                  done: int = 0, total: int = 0):
+        self._emit("progress",
+                   pct=round(float(pct), 1),
+                   speed=speed, eta=eta, done=done, total=total)
 
     def _provider(self, key: str, state: str):
         self._emit("provider", key=key, state=state)
 
     def _worker(self, url, output_dir, quality, keep, list_fmt,
                 embed_thumb=True, embed_meta=True, audio_format="flac"):
+        """Dispatch: album/playlist → loop, single track → just call _download_one."""
+        url = url.strip()
+        try:
+            # Album / playlist detection
+            if is_album_or_playlist_url(url) and not list_fmt:
+                self._log(f"Detected album/playlist URL — expanding…", "info")
+                s     = cfg.load()
+                proxy = s.get("proxy") or None
+                track_urls: list[str] = []
+                if "open.spotify.com/" in url and ("/album/" in url or "/playlist/" in url):
+                    tracks = fetch_spotify_album_tracks(url, proxy=proxy)
+                    track_urls = [t["url"] for t in tracks if t.get("url")]
+                # For YouTube/Bandcamp/SoundCloud playlists, yt-dlp handles natively —
+                # pass the URL through but disable noplaylist below.
+
+                if track_urls:
+                    self._log(f"Album/playlist contains {len(track_urls)} tracks.", "bright")
+                    for i, t_url in enumerate(track_urls, 1):
+                        if self._abort_flag:
+                            self._log("Aborted.", "warn")
+                            break
+                        self._log(f"\n=== Track {i}/{len(track_urls)} ===", "bright")
+                        self._emit("album_progress", current=i, total=len(track_urls))
+                        # Reset provider dots between tracks
+                        for k in ("ytdlp","odesli","proxy","musicbrainz"):
+                            self._provider(k, "idle")
+                        self._download_one(t_url, output_dir, quality, keep, False,
+                                           embed_thumb, embed_meta, audio_format)
+                    self._log(f"\nAlbum/playlist complete: {len(track_urls)} tracks processed.", "bright")
+                    return
+                # Fallthrough: let yt-dlp's native playlist support handle it
+            # Single track / native-playlist URL
+            self._download_one(url, output_dir, quality, keep, list_fmt,
+                               embed_thumb, embed_meta, audio_format)
+        finally:
+            self._downloading = False
+            self._emit("done")
+
+    def _download_one(self, url, output_dir, quality, keep, list_fmt,
+                      embed_thumb=True, embed_meta=True, audio_format="flac"):
         s          = cfg.load()
         proxy      = s.get("proxy") or None
         ffmpeg_dir = find_ffmpeg()
@@ -187,7 +251,10 @@ class API:
             if d["status"] == "downloading":
                 total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
                 done  = d.get("downloaded_bytes", 0)
-                self._progress((done / total * 100) if total else 0)
+                speed = d.get("speed") or 0
+                eta   = d.get("eta") or 0
+                pct   = (done / total * 100) if total else 0
+                self._progress(pct, speed=speed, eta=eta, done=done, total=total)
             elif d["status"] == "finished":
                 self._log(f"Downloaded: {Path(d['filename']).name}", "bright")
                 self._log("Converting to FLAC…", "dim")
@@ -421,6 +488,21 @@ class API:
                 else:
                     self._log("Could not parse Spotify page either.", "warn")
 
+            # 2c. Duplicate detection — once we know artist+title, check if the
+            # destination file already exists and ask the user before downloading again.
+            if artist and title:
+                import re as _re
+                safe = _re.sub(r'[<>:"/\\|?*]', "_", f"{artist} - {title}")
+                existing = Path(output_dir) / f"{safe}.{audio_format}"
+                if existing.exists():
+                    self._log(f"File already exists: {existing.name}", "warn")
+                    if not self._ask_user(
+                        f"\"{existing.name}\" already exists in this folder. "
+                        f"Download it again and overwrite?"):
+                        self._log("Skipped (user kept existing file).", "ok")
+                        self._provider("ytdlp", "skip")
+                        return
+
             # 3. yt-dlp retry on resolved URLs
             if resolved:
                 for plat, alt_url in odesli.all_urls(resolved):
@@ -484,6 +566,23 @@ class API:
                         yt_ok = True
                     else:
                         self._log(f"  YouTube search failed: {e3}", "warn")
+
+                # 3.6 SoundCloud search fallback — if YouTube didn't produce a file
+                if not yt_ok and artist and title:
+                    self._log(f"Searching SoundCloud: {artist} — {title}", "info")
+                    sc_search = f"scsearch1:{artist} - {title}"
+                    opts_sc = dict(opts3)
+                    opts_sc["logger"] = Logger(self._log)
+                    try:
+                        with yt_dlp.YoutubeDL(opts_sc) as ydl:
+                            ydl.download([sc_search])
+                        yt_ok = True
+                    except Exception as e_sc:
+                        ext_check = audio_format
+                        if (Path(output_dir) / f"{safe_name}.{ext_check}").exists():
+                            yt_ok = True
+                        else:
+                            self._log(f"  SoundCloud search failed: {e_sc}", "warn")
 
                 if yt_ok:
                     # Find the produced file (account for ogg→.ogg naming)
@@ -622,9 +721,8 @@ class API:
 
         except Exception as exc:
             self._log(f"ERROR: {exc}", "err")
-        finally:
-            self._downloading = False
-            self._emit("done")
+        # NOTE: _downloading flag + 'done' event are reset by the outer _worker
+        # so album loops can keep going across multiple track downloads.
 
     def _worker_video(self, url, output_dir, video_format, quality,
                       embed_thumb, embed_meta, write_subs):
