@@ -169,8 +169,35 @@ html, body {
   display: flex;
   flex-direction: column;
 }
-.tab-pane { display: none; flex: 1; overflow: hidden; flex-direction: column; padding: 8px 10px; }
+.tab-pane { display: none; flex-shrink: 0; flex-direction: column; padding: 8px 10px 4px; }
 .tab-pane.active { display: flex; }
+.tab-pane.full-height.active { flex: 1; overflow: hidden; }
+
+/* Shared output area (visible on Audio + Video tabs) */
+#outputArea {
+  display: none;
+  flex: 1;
+  flex-direction: column;
+  padding: 4px 10px 8px;
+  min-height: 0;
+}
+#outputArea.active { display: flex; }
+
+/* Win95-styled select */
+select.form-control {
+  background: #fff;
+  border: 0;
+  padding: 2px 4px;
+  font-family: var(--font);
+  font-size: var(--font-sz);
+  outline: none;
+  cursor: pointer;
+  box-shadow:
+    inset  1px  1px 0 var(--win-darker),
+    inset -1px -1px 0 var(--win-light),
+    inset  2px  2px 0 var(--win-dark),
+    inset -2px -2px 0 var(--win-lighter);
+}
 
 /* ── Buttons ──────────────────────────────────────────────────────────────── */
 button.btn {
@@ -537,7 +564,8 @@ hr.separator {
 
   <!-- Tab Strip -->
   <div class="tab-strip">
-    <button class="tab-btn active" id="tab-download" onclick="switchTab('download')">Download</button>
+    <button class="tab-btn active" id="tab-audio"    onclick="switchTab('audio')">Audio</button>
+    <button class="tab-btn"        id="tab-video"    onclick="switchTab('video')">Video</button>
     <button class="tab-btn"        id="tab-settings" onclick="switchTab('settings')">Settings</button>
   </div>
   <div class="tab-border"></div>
@@ -554,31 +582,42 @@ hr.separator {
   <!-- Window Body -->
   <div class="window-body">
 
-    <!-- ── DOWNLOAD TAB ──────────────────────────────────────────────────── -->
-    <div class="tab-pane active" id="pane-download">
+    <!-- ── AUDIO TAB ─────────────────────────────────────────────────────── -->
+    <div class="tab-pane active" id="pane-audio">
 
       <div class="form-group">
         <label>URL <span class="label-sm">(Spotify · YouTube · SoundCloud · Bandcamp · …)</span></label>
-        <div class="input-group">
-          <input type="url" class="form-control" id="urlInput" placeholder="Paste a music URL here…" autocomplete="off" spellcheck="false">
-        </div>
+        <input type="url" class="form-control" id="urlInput" placeholder="Paste a music URL here…" autocomplete="off" spellcheck="false">
       </div>
 
       <div class="form-group">
         <label>Save to</label>
         <div class="input-group">
           <input type="text" class="form-control" id="outputDir" spellcheck="false">
-          <button class="btn" onclick="browseFolder()" style="min-width:70px">Browse…</button>
+          <button class="btn" onclick="browseFolder('audio')" style="min-width:70px">Browse…</button>
         </div>
       </div>
 
-      <div class="form-group">
-        <label>FLAC compression &nbsp;<span class="label-sm" id="qualityLabel">0 — fastest / largest file</span></label>
-        <div style="display:flex;align-items:center;gap:6px;margin-top:2px">
-          <span class="label-sm" style="flex-shrink:0">0</span>
-          <input type="range" id="qualitySlider" min="0" max="9" value="0"
-                 oninput="updateQualityLabel(this.value)" style="flex:1;margin:0">
-          <span class="label-sm" style="flex-shrink:0">9</span>
+      <div class="flex-row" style="gap:8px">
+        <div class="form-group" style="flex:1">
+          <label>Format</label>
+          <select class="form-control" id="audioFormat" onchange="onAudioFormatChange()">
+            <option value="flac" selected>FLAC (lossless)</option>
+            <option value="mp3">MP3</option>
+            <option value="m4a">M4A / AAC</option>
+            <option value="ogg">OGG / Vorbis</option>
+            <option value="opus">Opus</option>
+            <option value="wav">WAV (uncompressed)</option>
+          </select>
+        </div>
+        <div class="form-group" style="flex:2" id="qualityRow">
+          <label><span id="qualityRowLabel">FLAC compression</span> &nbsp;<span class="label-sm" id="qualityLabel">0 — fastest / largest file</span></label>
+          <div style="display:flex;align-items:center;gap:6px;margin-top:2px">
+            <span class="label-sm" id="qualityMin" style="flex-shrink:0">0</span>
+            <input type="range" id="qualitySlider" min="0" max="9" value="0"
+                   oninput="updateQualityLabel(this.value)" style="flex:1;margin:0">
+            <span class="label-sm" id="qualityMax" style="flex-shrink:0">9</span>
+          </div>
         </div>
       </div>
 
@@ -599,42 +638,74 @@ hr.separator {
         </label>
       </div>
 
-      <hr class="separator" style="margin-top:8px">
-
       <div class="flex-row mt4">
-        <button class="btn" id="btnDownload" onclick="startDownload()" style="min-width:90px;font-weight:bold">Download</button>
-        <button class="btn" id="btnAbort"    onclick="abortDownload()" disabled>Abort</button>
-        <button class="btn" id="btnClear"    onclick="clearLog()">Clear Log</button>
+        <button class="btn" id="btnDownloadAudio" onclick="startAudioDownload()" style="min-width:110px;font-weight:bold">Download Audio</button>
       </div>
 
-      <hr class="separator">
+    </div><!-- /pane-audio -->
 
-      <!-- Provider chain -->
-      <div class="provider-chain">
-        <span style="color:var(--win-dark)">Providers:</span>
-        <div class="provider-item"><div class="provider-dot idle" id="dot-ytdlp"></div><span>yt-dlp</span></div>
-        <div class="provider-item"><div class="provider-dot idle" id="dot-odesli"></div><span>Odesli</span></div>
-        <div class="provider-item"><div class="provider-dot idle" id="dot-proxy"></div><span>Proxy</span></div>
-        <div class="provider-item"><div class="provider-dot idle" id="dot-musicbrainz"></div><span>MusicBrainz</span></div>
+    <!-- ── VIDEO TAB ─────────────────────────────────────────────────────── -->
+    <div class="tab-pane" id="pane-video">
+
+      <div class="form-group">
+        <label>URL <span class="label-sm">(YouTube · Vimeo · Twitch · Twitter · …)</span></label>
+        <input type="url" class="form-control" id="urlInputVideo" placeholder="Paste a video URL here…" autocomplete="off" spellcheck="false">
       </div>
 
-      <!-- Log -->
-      <div class="log-wrap" id="logWrap" style="margin-top:4px">
-        <span id="logContent"></span><span class="log-cursor"></span>
-      </div>
-
-      <!-- Progress -->
-      <div style="margin-top:6px;flex-shrink:0">
-        <div class="progress-wrap" id="progressWrap">
-          <div class="progress-fill" id="progressFill"></div>
-          <span class="progress-label" id="progressLabel">0%</span>
+      <div class="form-group">
+        <label>Save to</label>
+        <div class="input-group">
+          <input type="text" class="form-control" id="outputDirVideo" spellcheck="false">
+          <button class="btn" onclick="browseFolder('video')" style="min-width:70px">Browse…</button>
         </div>
       </div>
 
-    </div><!-- /pane-download -->
+      <div class="flex-row" style="gap:8px">
+        <div class="form-group" style="flex:1">
+          <label>Container</label>
+          <select class="form-control" id="videoFormat">
+            <option value="mp4" selected>MP4 (most compatible)</option>
+            <option value="mkv">MKV (highest quality)</option>
+            <option value="webm">WebM</option>
+            <option value="best">Best available</option>
+          </select>
+        </div>
+        <div class="form-group" style="flex:1">
+          <label>Quality</label>
+          <select class="form-control" id="videoQuality">
+            <option value="best">Best available</option>
+            <option value="2160">4K (2160p)</option>
+            <option value="1440">1440p</option>
+            <option value="1080" selected>1080p</option>
+            <option value="720">720p</option>
+            <option value="480">480p</option>
+            <option value="360">360p</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="flex-row mt4" style="gap:20px">
+        <label class="form-check">
+          <input type="checkbox" id="embedThumbVideo" checked> Embed thumbnail
+        </label>
+        <label class="form-check">
+          <input type="checkbox" id="embedMetaVideo" checked> Embed metadata <span class="label-sm">(title, uploader, description…)</span>
+        </label>
+      </div>
+      <div class="flex-row mt4" style="gap:20px">
+        <label class="form-check">
+          <input type="checkbox" id="writeSubs"> Download subtitles (if available)
+        </label>
+      </div>
+
+      <div class="flex-row mt4">
+        <button class="btn" id="btnDownloadVideo" onclick="startVideoDownload()" style="min-width:110px;font-weight:bold">Download Video</button>
+      </div>
+
+    </div><!-- /pane-video -->
 
     <!-- ── SETTINGS TAB ──────────────────────────────────────────────────── -->
-    <div class="tab-pane" id="pane-settings">
+    <div class="tab-pane full-height" id="pane-settings">
       <div class="settings-scroll">
 
         <div class="section-title">SpotiFlac Integration</div>
@@ -711,6 +782,38 @@ hr.separator {
       </div>
     </div><!-- /pane-settings -->
 
+    <!-- ── SHARED OUTPUT (Audio + Video tabs) ────────────────────────────── -->
+    <div id="outputArea" class="active">
+      <hr class="separator">
+      <div class="flex-row">
+        <button class="btn" id="btnAbort" onclick="abortDownload()" disabled>Abort</button>
+        <button class="btn" id="btnClear" onclick="clearLog()">Clear Log</button>
+      </div>
+      <hr class="separator">
+
+      <!-- Provider chain -->
+      <div class="provider-chain">
+        <span style="color:var(--win-dark)">Providers:</span>
+        <div class="provider-item"><div class="provider-dot idle" id="dot-ytdlp"></div><span>yt-dlp</span></div>
+        <div class="provider-item"><div class="provider-dot idle" id="dot-odesli"></div><span>Odesli</span></div>
+        <div class="provider-item"><div class="provider-dot idle" id="dot-proxy"></div><span>Proxy</span></div>
+        <div class="provider-item"><div class="provider-dot idle" id="dot-musicbrainz"></div><span>MusicBrainz</span></div>
+      </div>
+
+      <!-- Log -->
+      <div class="log-wrap" id="logWrap" style="margin-top:4px">
+        <span id="logContent"></span><span class="log-cursor"></span>
+      </div>
+
+      <!-- Progress -->
+      <div style="margin-top:6px;flex-shrink:0">
+        <div class="progress-wrap" id="progressWrap">
+          <div class="progress-fill" id="progressFill"></div>
+          <span class="progress-label" id="progressLabel">0%</span>
+        </div>
+      </div>
+    </div>
+
   </div><!-- /window-body -->
 
   <!-- Status Bar -->
@@ -735,15 +838,51 @@ function switchTab(name) {
   document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
   document.getElementById('tab-' + name).classList.add('active');
   document.getElementById('pane-' + name).classList.add('active');
+  // Output (log/progress/provider) is shared between audio+video, hidden on settings
+  const out = document.getElementById('outputArea');
+  if (name === 'audio' || name === 'video') out.classList.add('active');
+  else                                       out.classList.remove('active');
 }
 
-// ── Quality label ─────────────────────────────────────────────────────────────
-const QUALITY_LABELS = {
-  '0':'0 (fastest / largest file)', '1':'1', '2':'2', '3':'3', '4':'4',
-  '5':'5 (balanced)', '6':'6', '7':'7', '8':'8', '9':'9 (smallest / slowest)',
+// ── Audio format / quality ────────────────────────────────────────────────────
+// Per-format slider config: [min, max, default, formatter(v) -> labelText, rowLabel]
+const AUDIO_QUALITY_CONFIGS = {
+  flac: { min: 0,  max: 12, def: 5,   row: 'FLAC compression',
+          fmt: v => v === '0' ? '0 — fastest / largest file'
+                  : v === '5' ? '5 — balanced (default)'
+                  : v === '12'? '12 — best compression / slowest'
+                  : v },
+  mp3:  { min: 0,  max: 4,  def: 4,   row: 'Bitrate',
+          fmt: v => MP3_BITRATES[v] },
+  m4a:  { min: 0,  max: 4,  def: 4,   row: 'Bitrate',
+          fmt: v => MP3_BITRATES[v] },
+  ogg:  { min: 3,  max: 10, def: 7,   row: 'Vorbis quality',
+          fmt: v => v + ' (~' + Math.round([0,0,0,112,128,160,192,224,256,320,500][v]||0) + ' kbps)' },
+  opus: { min: 0,  max: 4,  def: 3,   row: 'Bitrate',
+          fmt: v => OPUS_BITRATES[v] },
+  wav:  { min: 0,  max: 0,  def: 0,   row: 'Bitrate',
+          fmt: v => 'uncompressed (16-bit PCM)' },
 };
+const MP3_BITRATES  = ['128 kbps', '192 kbps', '256 kbps', '320 kbps', 'V0 (≈245 kbps VBR)'];
+const OPUS_BITRATES = ['96 kbps', '128 kbps', '160 kbps', '192 kbps', '256 kbps'];
+
+function onAudioFormatChange() {
+  const fmt = document.getElementById('audioFormat').value;
+  const cfg = AUDIO_QUALITY_CONFIGS[fmt];
+  const slider = document.getElementById('qualitySlider');
+  slider.min  = cfg.min;
+  slider.max  = cfg.max;
+  slider.value = cfg.def;
+  document.getElementById('qualityMin').textContent = cfg.min;
+  document.getElementById('qualityMax').textContent = cfg.max;
+  document.getElementById('qualityRowLabel').textContent = cfg.row;
+  slider.disabled = (fmt === 'wav');
+  updateQualityLabel(slider.value);
+}
+
 function updateQualityLabel(v) {
-  document.getElementById('qualityLabel').textContent = QUALITY_LABELS[v] || v;
+  const fmt = document.getElementById('audioFormat').value;
+  document.getElementById('qualityLabel').textContent = AUDIO_QUALITY_CONFIGS[fmt].fmt(v);
 }
 
 // ── Log ───────────────────────────────────────────────────────────────────────
@@ -794,15 +933,18 @@ function setStatus(msg) {
 }
 
 // ── Browse ────────────────────────────────────────────────────────────────────
-async function browseFolder() {
+async function browseFolder(which) {
   const folder = await api('browse_folder');
-  if (folder) document.getElementById('outputDir').value = folder;
+  if (!folder) return;
+  const target = which === 'video' ? 'outputDirVideo' : 'outputDir';
+  document.getElementById(target).value = folder;
 }
 
-// ── Download ──────────────────────────────────────────────────────────────────
-async function startDownload() {
+// ── Download (Audio) ──────────────────────────────────────────────────────────
+async function startAudioDownload() {
   const url    = document.getElementById('urlInput').value.trim();
   const outDir = document.getElementById('outputDir').value.trim();
+  const fmt    = document.getElementById('audioFormat').value;
   const qual   = parseInt(document.getElementById('qualitySlider').value, 10);
   const keep   = document.getElementById('keepOriginal').checked;
   const listFm = document.getElementById('listFormats').checked;
@@ -811,14 +953,37 @@ async function startDownload() {
 
   if (!url) { appendLog('No URL provided.', 'err'); return; }
 
-  const result = await api('start_download', url, outDir, qual, keep, listFm, thumb, meta);
+  const result = await api('start_download', url, outDir, qual, keep, listFm, thumb, meta, fmt);
   if (!result.ok) { appendLog(result.msg, 'err'); return; }
 
-  document.getElementById('btnDownload').disabled = true;
-  document.getElementById('btnAbort').disabled    = false;
+  beforeDownload('audio');
+}
+
+// ── Download (Video) ──────────────────────────────────────────────────────────
+async function startVideoDownload() {
+  const url    = document.getElementById('urlInputVideo').value.trim();
+  const outDir = document.getElementById('outputDirVideo').value.trim();
+  const vfmt   = document.getElementById('videoFormat').value;
+  const vqual  = document.getElementById('videoQuality').value;
+  const thumb  = document.getElementById('embedThumbVideo').checked;
+  const meta   = document.getElementById('embedMetaVideo').checked;
+  const subs   = document.getElementById('writeSubs').checked;
+
+  if (!url) { appendLog('No URL provided.', 'err'); return; }
+
+  const result = await api('start_video_download', url, outDir, vfmt, vqual, thumb, meta, subs);
+  if (!result.ok) { appendLog(result.msg, 'err'); return; }
+
+  beforeDownload('video');
+}
+
+function beforeDownload(kind) {
+  document.getElementById('btnDownloadAudio').disabled = true;
+  document.getElementById('btnDownloadVideo').disabled = true;
+  document.getElementById('btnAbort').disabled         = false;
   resetProviders();
   pulseProgress();
-  setStatus('Downloading…');
+  setStatus(kind === 'video' ? 'Downloading video…' : 'Downloading…');
   startPolling();
 }
 
@@ -845,8 +1010,9 @@ async function pollUpdates() {
     else if (u.kind === 'update_available') showUpdateBanner(u.version, u.notes, u.url);
     else if (u.kind === 'done') {
       stopPolling();
-      document.getElementById('btnDownload').disabled = false;
-      document.getElementById('btnAbort').disabled    = true;
+      document.getElementById('btnDownloadAudio').disabled = false;
+      document.getElementById('btnDownloadVideo').disabled = false;
+      document.getElementById('btnAbort').disabled         = true;
       setStatus('Ready');
     }
   });
@@ -906,7 +1072,11 @@ async function saveSettings() {
 async function init() {
   const d = await api('get_init_data');
 
-  document.getElementById('outputDir').value = d.defaultOutput;
+  document.getElementById('outputDir').value      = d.defaultOutput;
+  document.getElementById('outputDirVideo').value = d.defaultVideoOutput || d.defaultOutput;
+
+  // Initialize audio format slider
+  onAudioFormatChange();
 
   // Settings tab pre-fill
   document.getElementById('sAutoFallback').checked = d.autoFallback;

@@ -20,7 +20,8 @@ from providers import (OdesliResolver, QobuzAPI, SpotiflacProxy,
 from utils import find_ffmpeg, tag_flac_file
 from version import __version__, GITHUB_OWNER, GITHUB_REPO
 
-DEFAULT_OUT = str(Path.home() / "Music" / "Swiss Downloads")
+DEFAULT_OUT       = str(Path.home() / "Music"  / "Swiss Downloads")
+DEFAULT_VIDEO_OUT = str(Path.home() / "Videos" / "Swiss Downloads")
 
 
 class API:
@@ -48,8 +49,9 @@ class API:
         ffmpeg = find_ffmpeg()
         sf     = SpotiflacProxy()
         return {
-            "defaultOutput":    DEFAULT_OUT,
-            "ffmpegFound":      ffmpeg is not None,
+            "defaultOutput":      DEFAULT_OUT,
+            "defaultVideoOutput": DEFAULT_VIDEO_OUT,
+            "ffmpegFound":        ffmpeg is not None,
             "ffmpegPath":       str(ffmpeg / ("ffmpeg.exe" if sys.platform == "win32" else "ffmpeg")) if ffmpeg else "",
             "autoFallback":     s.get("auto_fallback", True),
             "qobuzFormat":      s.get("qobuz_format", 6),
@@ -97,7 +99,8 @@ class API:
                        quality: int, keep_original: bool,
                        list_formats: bool,
                        embed_thumb: bool = True,
-                       embed_meta: bool = True) -> dict:
+                       embed_meta:  bool = True,
+                       audio_format: str = "flac") -> dict:
         if self._downloading:
             return {"ok": False, "msg": "Already downloading."}
         url = url.strip()
@@ -111,7 +114,32 @@ class API:
         threading.Thread(
             target=self._worker,
             args=(url, output_dir, int(quality), bool(keep_original),
-                  bool(list_formats), bool(embed_thumb), bool(embed_meta)),
+                  bool(list_formats), bool(embed_thumb), bool(embed_meta),
+                  str(audio_format).lower()),
+            daemon=True,
+        ).start()
+        return {"ok": True}
+
+    def start_video_download(self, url: str, output_dir: str,
+                             video_format: str, quality: str,
+                             embed_thumb: bool = True,
+                             embed_meta:  bool = True,
+                             write_subs:  bool = False) -> dict:
+        if self._downloading:
+            return {"ok": False, "msg": "Already downloading."}
+        url = url.strip()
+        if not url:
+            return {"ok": False, "msg": "No URL provided."}
+        if yt_dlp is None:
+            return {"ok": False, "msg": "yt-dlp not installed."}
+
+        self._downloading = True
+        self._abort_flag  = False
+        threading.Thread(
+            target=self._worker_video,
+            args=(url, output_dir, str(video_format).lower(),
+                  str(quality), bool(embed_thumb), bool(embed_meta),
+                  bool(write_subs)),
             daemon=True,
         ).start()
         return {"ok": True}
@@ -145,7 +173,7 @@ class API:
         self._emit("provider", key=key, state=state)
 
     def _worker(self, url, output_dir, quality, keep, list_fmt,
-                embed_thumb=True, embed_meta=True):
+                embed_thumb=True, embed_meta=True, audio_format="flac"):
         s          = cfg.load()
         proxy      = s.get("proxy") or None
         ffmpeg_dir = find_ffmpeg()
@@ -171,20 +199,46 @@ class API:
             def warning(self, m): self.cb(m, "warn")
             def error(self, m):  self.cb(m, "err"); self.errors.append(m)
 
+        # Map UI format → (yt-dlp preferredcodec, preferredquality)
+        # For FLAC the quality param is the compression level (0–12).
+        # For MP3/M4A/Opus it's bitrate in kbps (or "0" for VBR-V0 on MP3).
+        # For OGG/vorbis it's quality level 0–10.
+        # For WAV it's ignored.
+        def _audio_postproc():
+            f = audio_format
+            if f == "mp3":
+                bitrates = ["128", "192", "256", "320", "0"]   # last is VBR-V0
+                q = bitrates[max(0, min(int(quality), 4))]
+                return {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": q}
+            if f == "m4a":
+                bitrates = ["128", "192", "256", "320", "320"]
+                q = bitrates[max(0, min(int(quality), 4))]
+                return {"key": "FFmpegExtractAudio", "preferredcodec": "m4a", "preferredquality": q}
+            if f == "ogg":
+                return {"key": "FFmpegExtractAudio", "preferredcodec": "vorbis", "preferredquality": str(quality)}
+            if f == "opus":
+                bitrates = ["96", "128", "160", "192", "256"]
+                q = bitrates[max(0, min(int(quality), 4))]
+                return {"key": "FFmpegExtractAudio", "preferredcodec": "opus", "preferredquality": q}
+            if f == "wav":
+                return {"key": "FFmpegExtractAudio", "preferredcodec": "wav"}
+            # default flac
+            return {"key": "FFmpegExtractAudio", "preferredcodec": "flac",
+                    "preferredquality": str(quality)}
+
         def make_opts(target_url):
             tpl = str(Path(output_dir) / "%(artist|%(uploader)s)s - %(title)s.%(ext)s")
-            pps = [{"key": "FFmpegExtractAudio",
-                    "preferredcodec": "flac",
-                    "preferredquality": str(quality)}]
+            pps = [_audio_postproc()]
             if embed_meta:
                 pps.append({"key": "FFmpegMetadata", "add_metadata": True})
-            if embed_thumb:
+            if embed_thumb and audio_format != "wav":
+                # WAV doesn't support embedded album art
                 pps.append({"key": "EmbedThumbnail"})
             opts = {
                 "format":          "bestaudio/best",
                 "outtmpl":         tpl,
                 "postprocessors":  pps,
-                "writethumbnail":  embed_thumb,
+                "writethumbnail":  embed_thumb and audio_format != "wav",
                 "keepvideo":       keep,
                 "progress_hooks":  [ydl_hook],
             }
@@ -431,6 +485,95 @@ class API:
             self._log("All providers exhausted — could not download this track.", "err")
 
         except Exception as exc:
+            self._log(f"ERROR: {exc}", "err")
+        finally:
+            self._downloading = False
+            self._emit("done")
+
+    def _worker_video(self, url, output_dir, video_format, quality,
+                      embed_thumb, embed_meta, write_subs):
+        s          = cfg.load()
+        proxy      = s.get("proxy") or None
+        ffmpeg_dir = find_ffmpeg()
+
+        def ydl_hook(d):
+            if self._abort_flag:
+                raise yt_dlp.utils.DownloadError("Aborted by user")
+            if d["status"] == "downloading":
+                total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+                done  = d.get("downloaded_bytes", 0)
+                self._progress((done / total * 100) if total else 0)
+            elif d["status"] == "finished":
+                self._log(f"Downloaded: {Path(d['filename']).name}", "bright")
+                self._progress(100)
+
+        class Logger:
+            def __init__(self, cb):
+                self.cb = cb
+            def debug(self, m):
+                if not m.startswith("[debug]"): self.cb(m, "dim")
+            def info(self, m):    self.cb(m, "dim")
+            def warning(self, m): self.cb(m, "warn")
+            def error(self, m):   self.cb(m, "err")
+
+        # Build format string + merge container
+        height = "" if quality == "best" else f"[height<={quality}]"
+        if video_format == "mp4":
+            fmt = (f"bestvideo{height}[ext=mp4]+bestaudio[ext=m4a]"
+                   f"/bestvideo{height}+bestaudio"
+                   f"/best{height}[ext=mp4]/best{height}/best")
+            merge = "mp4"
+        elif video_format == "mkv":
+            fmt   = f"bestvideo{height}+bestaudio/best{height}/best"
+            merge = "mkv"
+        elif video_format == "webm":
+            fmt = (f"bestvideo{height}[ext=webm]+bestaudio[ext=webm]"
+                   f"/bestvideo{height}+bestaudio"
+                   f"/best{height}[ext=webm]/best{height}/best")
+            merge = "webm"
+        else:  # best
+            fmt   = f"bestvideo{height}+bestaudio/best{height}/best"
+            merge = None
+
+        pps = []
+        if embed_meta:  pps.append({"key": "FFmpegMetadata", "add_metadata": True})
+        if embed_thumb: pps.append({"key": "EmbedThumbnail"})
+
+        tpl  = str(Path(output_dir) / "%(uploader)s - %(title)s.%(ext)s")
+        opts = {
+            "format":         fmt,
+            "outtmpl":        tpl,
+            "postprocessors": pps,
+            "writethumbnail": embed_thumb,
+            "writesubtitles": write_subs,
+            "subtitleslangs": ["en", "en-US"] if write_subs else [],
+            "progress_hooks": [ydl_hook],
+            "logger":         Logger(self._log),
+        }
+        if merge:      opts["merge_output_format"] = merge
+        if ffmpeg_dir: opts["ffmpeg_location"]     = str(ffmpeg_dir)
+        if proxy:      opts["proxy"]               = proxy
+
+        try:
+            Path(output_dir).mkdir(parents=True, exist_ok=True)
+            self._provider("ytdlp", "active")
+            q_label = "best" if quality == "best" else f"up to {quality}p"
+            self._log(f"Downloading video ({video_format.upper()}, {q_label}): {url}", "ok")
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([url])
+            self._provider("ytdlp", "ok")
+            self._log(f"Done! Saved to: {output_dir}", "bright")
+        except yt_dlp.utils.DownloadError as e:
+            self._provider("ytdlp", "fail")
+            err = str(e)
+            if "Aborted" in err:
+                self._log("Aborted.", "warn")
+            elif is_drm_error(err):
+                self._log("DRM-protected video — cannot bypass.", "err")
+            else:
+                self._log(f"ERROR: {err}", "err")
+        except Exception as exc:
+            self._provider("ytdlp", "fail")
             self._log(f"ERROR: {exc}", "err")
         finally:
             self._downloading = False
