@@ -16,7 +16,8 @@ except ImportError:
 
 import settings as cfg
 from providers import (OdesliResolver, QobuzAPI, SpotiflacProxy,
-                       MusicBrainz, is_drm_error, extract_qobuz_id)
+                       MusicBrainz, is_drm_error, extract_qobuz_id,
+                       fetch_spotify_metadata, clean_url)
 from utils import find_ffmpeg, tag_flac_file
 from version import __version__, GITHUB_OWNER, GITHUB_REPO
 
@@ -336,18 +337,33 @@ class API:
             self._provider("odesli", "active")
             self._log("Resolving via Odesli (song.link)…", "info")
             resolved = title = artist = None
+            odesli   = OdesliResolver()
             try:
-                odesli   = OdesliResolver()
-                resolved = odesli.resolve(url, proxy=proxy)
-                title    = resolved["title"]
-                artist   = resolved["artist"]
-                self._log(f"Found: {artist} — {title}", "bright")
-                for plat, purl in odesli.all_urls(resolved):
-                    self._log(f"  {plat:<14s}: {purl}", "dim")
-                self._provider("odesli", "ok")
+                resolved = odesli.resolve(clean_url(url), proxy=proxy)
+                title    = (resolved.get("title") or "").strip()
+                artist   = (resolved.get("artist") or "").strip()
+                if title and artist:
+                    self._log(f"Found: {artist} — {title}", "bright")
+                    for plat, purl in odesli.all_urls(resolved):
+                        self._log(f"  {plat:<14s}: {purl}", "dim")
+                    self._provider("odesli", "ok")
+                else:
+                    self._log("Odesli returned no metadata for this track.", "warn")
+                    self._provider("odesli", "fail")
             except Exception as e:
                 self._provider("odesli", "fail")
                 self._log(f"Odesli failed: {e}", "warn")
+
+            # 2b. If Odesli has no metadata and source is Spotify, scrape directly
+            if (not (title and artist)) and "open.spotify.com/track/" in url:
+                self._log("Reading metadata from Spotify page directly…", "info")
+                meta = fetch_spotify_metadata(url, proxy=proxy)
+                if meta:
+                    title  = meta["title"]
+                    artist = meta["artist"]
+                    self._log(f"Spotify says: {artist} — {title}", "bright")
+                else:
+                    self._log("Could not parse Spotify page either.", "warn")
 
             # 3. yt-dlp retry on resolved URLs
             if resolved:

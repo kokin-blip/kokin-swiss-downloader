@@ -56,6 +56,75 @@ def extract_qobuz_id(url: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def clean_url(url: str) -> str:
+    """Strip tracking params like Spotify's ?si=... that confuse some APIs."""
+    return re.sub(r'\?(si|igsh|utm_[^=]+|fbclid)=[^&]*(&|$)', '', url).rstrip('?&')
+
+
+def fetch_spotify_metadata(url: str, proxy: Optional[str] = None) -> Optional[dict]:
+    """
+    Scrape title/artist from an open.spotify.com track page.
+    Spotify embeds a JSON-LD <script> tag and og:* meta tags in the public
+    HTML — no auth required, no API key needed.
+
+    Returns {"title": str, "artist": str} or None.
+    """
+    if "open.spotify.com/track/" not in url:
+        return None
+    try:
+        req = urllib.request.Request(
+            clean_url(url),
+            headers={"User-Agent": _UA, "Accept-Language": "en-US,en;q=0.9"},
+        )
+        with _opener(proxy).open(req, timeout=15) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+    # 1. JSON-LD (most reliable — structured schema.org MusicRecording)
+    for blob in re.findall(
+            r'<script[^>]+type="application/ld\+json"[^>]*>(.+?)</script>',
+            html, re.DOTALL):
+        try:
+            data = json.loads(blob)
+        except Exception:
+            continue
+        if isinstance(data, list):
+            data = next((d for d in data if isinstance(d, dict)), {})
+        if not isinstance(data, dict):
+            continue
+        title = data.get("name", "")
+        ba = data.get("byArtist") or []
+        if isinstance(ba, dict):
+            artist = ba.get("name", "")
+        elif isinstance(ba, list) and ba:
+            artist = ", ".join(a.get("name", "") for a in ba if isinstance(a, dict)).strip(", ")
+        else:
+            artist = ""
+        if title and artist:
+            return {"title": title.strip(), "artist": artist.strip()}
+
+    # 2. og:title + og:description fallback
+    m_t = re.search(r'<meta\s+property="og:title"\s+content="([^"]+)"', html)
+    m_d = re.search(r'<meta\s+property="og:description"\s+content="([^"]+)"', html)
+    if m_t and m_d:
+        title = m_t.group(1).strip()
+        desc  = m_d.group(1)
+        # Spotify format is usually "Song · Artist · Year"
+        parts = [p.strip() for p in re.split(r'\s+[·•]\s+', desc) if p.strip()]
+        artist = ""
+        for p in parts:
+            if p.lower() not in ("song", "single", "ep", "album") and not p.isdigit():
+                if p.lower().startswith("listen to "):
+                    continue
+                artist = p
+                break
+        if title and artist:
+            return {"title": title, "artist": artist}
+
+    return None
+
+
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
 
 _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
