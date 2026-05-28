@@ -63,11 +63,10 @@ def clean_url(url: str) -> str:
 
 def fetch_spotify_metadata(url: str, proxy: Optional[str] = None) -> Optional[dict]:
     """
-    Scrape title/artist from an open.spotify.com track page.
-    Spotify embeds a JSON-LD <script> tag and og:* meta tags in the public
-    HTML — no auth required, no API key needed.
+    Scrape track metadata from an open.spotify.com track page.
+    No auth required — pulls from the page's JSON-LD + og:* meta tags.
 
-    Returns {"title": str, "artist": str} or None.
+    Returns {"title", "artist", "album", "cover_url"} or None.
     """
     if "open.spotify.com/track/" not in url:
         return None
@@ -81,6 +80,8 @@ def fetch_spotify_metadata(url: str, proxy: Optional[str] = None) -> Optional[di
     except Exception:
         return None
 
+    title = artist = album = cover_url = ""
+
     # 1. JSON-LD (most reliable — structured schema.org MusicRecording)
     for blob in re.findall(
             r'<script[^>]+type="application/ld\+json"[^>]*>(.+?)</script>',
@@ -93,35 +94,60 @@ def fetch_spotify_metadata(url: str, proxy: Optional[str] = None) -> Optional[di
             data = next((d for d in data if isinstance(d, dict)), {})
         if not isinstance(data, dict):
             continue
-        title = data.get("name", "")
-        ba = data.get("byArtist") or []
-        if isinstance(ba, dict):
-            artist = ba.get("name", "")
-        elif isinstance(ba, list) and ba:
-            artist = ", ".join(a.get("name", "") for a in ba if isinstance(a, dict)).strip(", ")
-        else:
-            artist = ""
-        if title and artist:
-            return {"title": title.strip(), "artist": artist.strip()}
 
-    # 2. og:title + og:description fallback
-    m_t = re.search(r'<meta\s+property="og:title"\s+content="([^"]+)"', html)
-    m_d = re.search(r'<meta\s+property="og:description"\s+content="([^"]+)"', html)
-    if m_t and m_d:
-        title = m_t.group(1).strip()
-        desc  = m_d.group(1)
-        # Spotify format is usually "Song · Artist · Year"
-        parts = [p.strip() for p in re.split(r'\s+[·•]\s+', desc) if p.strip()]
-        artist = ""
-        for p in parts:
-            if p.lower() not in ("song", "single", "ep", "album") and not p.isdigit():
+        if not title:
+            title = data.get("name", "")
+        if not artist:
+            ba = data.get("byArtist") or []
+            if isinstance(ba, dict):
+                artist = ba.get("name", "")
+            elif isinstance(ba, list) and ba:
+                artist = ", ".join(a.get("name", "") for a in ba if isinstance(a, dict)).strip(", ")
+        if not album:
+            in_album = data.get("inAlbum") or {}
+            if isinstance(in_album, dict):
+                album = in_album.get("name", "")
+        if not cover_url:
+            img = data.get("image") or data.get("thumbnailUrl") or ""
+            if isinstance(img, list):
+                cover_url = img[0] if img else ""
+            elif isinstance(img, dict):
+                cover_url = img.get("url", "") or img.get("contentUrl", "")
+            else:
+                cover_url = img
+
+        if title and artist:
+            break
+
+    # 2. og: tag fallback for any missing field
+    if not (title and artist):
+        m_t = re.search(r'<meta\s+property="og:title"\s+content="([^"]+)"', html)
+        m_d = re.search(r'<meta\s+property="og:description"\s+content="([^"]+)"', html)
+        if m_t and not title:
+            title = m_t.group(1).strip()
+        if m_d and not artist:
+            desc  = m_d.group(1)
+            parts = [p.strip() for p in re.split(r'\s+[·•]\s+', desc) if p.strip()]
+            for p in parts:
+                if p.lower() in ("song", "single", "ep", "album") or p.isdigit():
+                    continue
                 if p.lower().startswith("listen to "):
                     continue
                 artist = p
                 break
-        if title and artist:
-            return {"title": title, "artist": artist}
 
+    if not cover_url:
+        m_img = re.search(r'<meta\s+property="og:image"\s+content="([^"]+)"', html)
+        if m_img:
+            cover_url = m_img.group(1)
+
+    if title and artist:
+        return {
+            "title":     title.strip(),
+            "artist":    artist.strip(),
+            "album":     album.strip(),
+            "cover_url": cover_url.strip(),
+        }
     return None
 
 

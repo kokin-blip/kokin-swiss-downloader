@@ -32,6 +32,7 @@ pyinstaller ^
   --add-data "ui;ui" ^
   --add-binary "ffmpeg\ffmpeg.exe;ffmpeg" ^
   --collect-all pywebview ^
+  --collect-all mutagen ^
   --icon icon.ico ^
   app.py
 

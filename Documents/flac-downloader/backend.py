@@ -384,21 +384,80 @@ class API:
                     except Exception as e2:
                         self._log(f"  {plat} failed: {e2}", "warn")
 
-            # 3.5 YouTube search — uses artist+title from Odesli, bypasses DRM entirely
+            # 3.5 YouTube search — uses artist+title from Odesli or Spotify scrape,
+            # bypasses DRM entirely. Uses our scraped metadata for the filename
+            # (avoids "(Official Music Video)" bloat) and embeds the Spotify cover
+            # art instead of the YouTube video thumbnail.
             if artist and title:
-                search = f"ytsearch1:{artist} - {title}"
+                import re as _re
+                safe_name = _re.sub(r'[<>:"/\\|?*\n\r\t]', "_", f"{artist} - {title}").strip()
+                search    = f"ytsearch1:{artist} - {title}"
                 self._log(f"Searching YouTube: {artist} — {title}", "info")
-                lg3  = Logger(self._log)
-                opts3 = make_opts(search)
-                opts3["logger"] = lg3
+
+                # If source was Spotify, fetch the album + cover URL now
+                spotify_meta = None
+                if "open.spotify.com" in url:
+                    spotify_meta = fetch_spotify_metadata(url, proxy=proxy)
+
+                # Strip yt-dlp's metadata + thumbnail postprocessors here — we'll do
+                # both ourselves below with the clean Spotify data, and that avoids
+                # any chance of a postprocessor crash hiding a successful download.
+                tpl = str(Path(output_dir) / f"{safe_name}.%(ext)s")
+                pps = [_audio_postproc()]
+                opts3 = {
+                    "format":         "bestaudio/best",
+                    "outtmpl":        tpl,
+                    "postprocessors": pps,
+                    "writethumbnail": False,
+                    "noplaylist":     True,
+                    "progress_hooks": [ydl_hook],
+                    "logger":         Logger(self._log),
+                }
+                if ffmpeg_dir: opts3["ffmpeg_location"] = str(ffmpeg_dir)
+                if proxy:      opts3["proxy"]           = proxy
+
+                yt_ok = False
                 try:
                     with yt_dlp.YoutubeDL(opts3) as ydl:
                         ydl.download([search])
-                    self._provider("ytdlp", "ok")
-                    self._log(f"Done via YouTube search! Saved to: {output_dir}", "bright")
-                    return
+                    yt_ok = True
                 except Exception as e3:
-                    self._log(f"  YouTube search failed: {e3}", "warn")
+                    # Even if yt-dlp raised, check if the audio file actually
+                    # exists — postprocessor errors fire after the file is saved.
+                    ext = audio_format if audio_format != "ogg" else "ogg"
+                    if (Path(output_dir) / f"{safe_name}.{ext}").exists():
+                        yt_ok = True
+                    else:
+                        self._log(f"  YouTube search failed: {e3}", "warn")
+
+                if yt_ok:
+                    # Find the produced file (account for ogg→.ogg naming)
+                    candidates = list(Path(output_dir).glob(f"{safe_name}.*"))
+                    audio_exts = {"flac", "mp3", "m4a", "ogg", "opus", "wav"}
+                    final = next(
+                        (p for p in candidates if p.suffix.lstrip(".").lower() in audio_exts),
+                        None,
+                    )
+
+                    # Clean up leftover thumbnail files yt-dlp may have created
+                    for p in candidates:
+                        if p.suffix.lstrip(".").lower() in ("webp", "jpg", "jpeg", "png"):
+                            try: p.unlink()
+                            except Exception: pass
+
+                    # Tag with mutagen using clean Spotify metadata + cover (FLAC only)
+                    if final and final.suffix.lower() == ".flac" and (embed_meta or embed_thumb):
+                        ti = {"title": title, "performer": {"name": artist}}
+                        if spotify_meta:
+                            ti["album"] = {
+                                "title": spotify_meta.get("album", ""),
+                                "image": {"large": spotify_meta.get("cover_url", "")},
+                            }
+                        tag_proxy_file(final, ti)
+
+                    self._provider("ytdlp", "ok")
+                    self._log(f"Done via YouTube! Saved: {final.name if final else safe_name}", "bright")
+                    return
 
             # 4. SpotiFlac proxy (anonymous — no account needed)
             self._provider("proxy", "active")
