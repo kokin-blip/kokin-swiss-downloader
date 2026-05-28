@@ -361,7 +361,15 @@ class SpotiflacProxy:
     ]
 
     def found(self) -> bool:
-        return _SPOTIFLAC_DIR.exists()
+        """
+        Always True — the proxy fallback URLs are hardcoded so the service is
+        available regardless of whether ~/.spotiflac/ exists on this machine.
+        """
+        return True
+
+    def has_local_db(self) -> bool:
+        """True if a ~/.spotiflac/provider_priority.db is present locally."""
+        return self._DB_PATH.exists()
 
     def services(self) -> list[tuple[str, str]]:
         """Return [(name, base_url)] parsed from DB, or the hardcoded fallback list."""

@@ -1084,15 +1084,12 @@ async function init() {
   const fmtRadio = document.querySelector(`input[name=fmt][value="${d.qobuzFormat}"]`);
   if (fmtRadio) fmtRadio.checked = true;
 
-  // SpotiFlac integration notice
+  // Proxy integration notice — proxies are always available (hardcoded fallback)
   const note = document.getElementById('spotiflacNote');
-  if (d.spotiflacFound) {
-    note.textContent = '✓ SpotiFlac found — proxy services available.';
-    note.style.color = 'green';
-  } else {
-    note.textContent = '⚠ ~/.spotiflac not found — proxy fallback unavailable.';
-    note.style.color = 'darkred';
-  }
+  const n    = (d.spotiflacSvcs || []).length;
+  note.textContent = '✓ Proxy services ready (' + n + ' endpoint' + (n === 1 ? '' : 's') + ').'
+                   + (d.spotiflacLocalDb ? ' Local ~/.spotiflac/ priority list detected.' : '');
+  note.style.color = 'green';
   const svcsEl = document.getElementById('spotiflacSvcs');
   if (d.spotiflacSvcs && d.spotiflacSvcs.length) {
     svcsEl.innerHTML = 'Services: ' + d.spotiflacSvcs.map(s =>
@@ -1116,8 +1113,8 @@ async function init() {
   // Boot log
   appendLog("Kokin's Swiss Downloader — ready.", 'bright');
   appendLog('ffmpeg: ' + (d.ffmpegFound ? d.ffmpegPath : 'NOT FOUND — install ffmpeg and add to PATH'), d.ffmpegFound ? 'dim' : 'err');
-  appendLog('SpotiFlac: ' + (d.spotiflacFound ? 'proxies ready (' + (d.spotiflacSvcs||[]).join(', ') + ')' : 'not found — proxy fallback unavailable'), d.spotiflacFound ? 'dim' : 'warn');
-  appendLog('Fallback chain: yt-dlp → Odesli → Proxy → MusicBrainz', 'dim');
+  appendLog('Proxy services: ' + ((d.spotiflacSvcs||[]).join(', ') || 'none'), 'dim');
+  appendLog('Fallback chain: yt-dlp → Odesli → YouTube search → Proxy → MusicBrainz', 'dim');
   appendLog('Paste a URL above and click Download.', 'ok');
   appendLog('⚠ Legal: only download content you own or have permission to copy.', 'warn');
 }

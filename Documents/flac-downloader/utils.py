@@ -9,29 +9,39 @@ from typing import Optional
 def find_ffmpeg() -> Path | None:
     """
     Locate ffmpeg, checking in order:
-      1. System PATH  (works for anyone who has ffmpeg installed normally)
-      2. A 'ffmpeg' sub-folder next to this script  (bundled distribution)
+      1. PyInstaller bundle (sys._MEIPASS/ffmpeg/)  — when running as a .exe
+      2. A 'ffmpeg' sub-folder next to this script  (dev / bundled distribution)
       3. The script's own directory                  (flat bundle)
-      4. ~/.spotiflac                                (backward-compat for existing users)
+      4. System PATH                                 (any normal install)
+      5. ~/.spotiflac                                (backward-compat)
     Returns the *directory* containing the ffmpeg binary, or None if not found.
     """
     exe = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
 
-    # 1. System PATH
-    found = shutil.which("ffmpeg")
-    if found:
-        return Path(found).parent
+    # 1. PyInstaller bundled location (highest priority — guaranteed to match)
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        bundled = Path(meipass) / "ffmpeg"
+        if (bundled / exe).exists():
+            return bundled
+        if (Path(meipass) / exe).exists():
+            return Path(meipass)
 
     # 2. Bundled sub-folder
     script_dir = Path(__file__).parent
     if (script_dir / "ffmpeg" / exe).exists():
         return script_dir / "ffmpeg"
 
-    # 3. Flat next to script (PyInstaller one-file unpacks here)
+    # 3. Flat next to script
     if (script_dir / exe).exists():
         return script_dir
 
-    # 4. spotiflac backward-compat (Windows only, non-fatal if absent)
+    # 4. System PATH
+    found = shutil.which("ffmpeg")
+    if found:
+        return Path(found).parent
+
+    # 5. spotiflac backward-compat (Windows only, non-fatal if absent)
     spoti = Path.home() / ".spotiflac" / exe
     if spoti.exists():
         return spoti.parent

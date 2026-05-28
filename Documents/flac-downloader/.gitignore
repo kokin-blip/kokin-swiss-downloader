@@ -5,3 +5,6 @@ build/
 dist/
 *.spec
 .env
+
+# 96 MB binary — fetched by build.bat / CI workflow instead of committed
+ffmpeg/

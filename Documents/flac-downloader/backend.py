@@ -56,7 +56,8 @@ class API:
             "autoFallback":     s.get("auto_fallback", True),
             "qobuzFormat":      s.get("qobuz_format", 6),
             "proxy":            s.get("proxy", ""),
-            "spotiflacFound":   sf.found(),
+            "spotiflacFound":   sf.found(),          # always True (built-in fallback)
+            "spotiflacLocalDb": sf.has_local_db(),   # true if user has ~/.spotiflac/
             "spotiflacSvcs":    [name for name, _ in sf.services()],
             "appVersion":       __version__,
             "updateConfigured": bool(GITHUB_OWNER and GITHUB_REPO),
