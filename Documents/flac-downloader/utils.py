@@ -96,12 +96,45 @@ def flac_cover_info(path: Path) -> dict:
         return {"present": False, "reason": str(e)}
 
 
-def _normalize_cover(data: bytes) -> tuple[bytes, str, int, int]:
+def _read_jpeg_dim(data: bytes) -> tuple[int, int]:
+    """Parse width/height from a JPEG by walking markers. (0,0) on failure."""
+    if data[:2] != b'\xff\xd8':
+        return 0, 0
+    i, L = 2, len(data)
+    while i < L - 9:
+        if data[i] != 0xff:
+            return 0, 0
+        while data[i] == 0xff and i + 1 < L:
+            i += 1
+        marker = data[i]
+        i += 1
+        # SOFn markers (Start Of Frame): 0xC0-0xCF except DHT/JPG/DAC
+        if 0xc0 <= marker <= 0xcf and marker not in (0xc4, 0xc8, 0xcc):
+            # length(2), precision(1), height(2), width(2)
+            height = (data[i+3] << 8) | data[i+4]
+            width  = (data[i+5] << 8) | data[i+6]
+            return width, height
+        if marker in (0xd8, 0xd9):  # SOI / EOI, no segment
+            continue
+        # Skip segment by length field
+        seg_len = (data[i] << 8) | data[i+1]
+        i += seg_len
+    return 0, 0
+
+
+def _read_png_dim(data: bytes) -> tuple[int, int]:
+    if data[:8] != b'\x89PNG\r\n\x1a\n':
+        return 0, 0
+    return int.from_bytes(data[16:20], 'big'), int.from_bytes(data[20:24], 'big')
+
+
+def _prepare_cover(data: bytes, mime_hint: str) -> tuple[bytes, str, int, int]:
     """
-    Decode cover image with Pillow, re-encode as JPEG, return
-    (jpeg_bytes, "image/jpeg", width, height).
-    Falls back to the original data with guessed dimensions on failure.
+    Return (bytes, mime, width, height) for embedding. Uses Pillow to
+    re-encode to clean JPEG when available, otherwise parses dimensions
+    from the original file's header (no Pillow dependency required).
     """
+    # Best case: Pillow available — normalize to a clean JPEG
     try:
         import io
         from PIL import Image
@@ -112,26 +145,40 @@ def _normalize_cover(data: bytes) -> tuple[bytes, str, int, int]:
         img.save(out, format="JPEG", quality=92, optimize=True)
         return out.getvalue(), "image/jpeg", img.width, img.height
     except Exception:
-        return data, "image/jpeg", 600, 600
+        pass
+
+    # No Pillow — detect format + dimensions from magic bytes alone
+    if data[:3] == b'\xff\xd8\xff':
+        w, h = _read_jpeg_dim(data)
+        return data, "image/jpeg", w or 600, h or 600
+    if data[:8] == b'\x89PNG\r\n\x1a\n':
+        w, h = _read_png_dim(data)
+        return data, "image/png",  w or 600, h or 600
+    return data, mime_hint or "image/jpeg", 600, 600
 
 
 def tag_flac_file(path: Path,
                   track_info: dict,
                   cover_data: Optional[bytes] = None,
-                  cover_mime: str = "image/jpeg") -> bool:
+                  cover_mime: str = "image/jpeg") -> tuple[bool, str]:
     """
-    Write Vorbis tags + optional cover art to a FLAC file using mutagen.
-    track_info is a Qobuz API track dict (or any dict with the same keys).
-    Returns True on success, False if mutagen is unavailable or tagging fails.
+    Write Vorbis tags + optional cover art to a FLAC file.
 
-    The PICTURE block is written with width/height/depth set so Windows
-    Explorer can recognize it as a file thumbnail.
+    Returns (success, error_message). On success error_message is "".
+    Each potential failure point is wrapped separately so the returned
+    message is specific enough to debug from the log.
     """
     try:
         from mutagen.flac import FLAC, Picture
+    except Exception as e:
+        return False, f"mutagen import failed: {e}"
 
+    try:
         audio = FLAC(str(path))
+    except Exception as e:
+        return False, f"cannot open FLAC: {e}"
 
+    try:
         title     = track_info.get("title", "")
         artist    = (track_info.get("performer") or {}).get("name", "") or \
                     track_info.get("artist", "")
@@ -149,22 +196,29 @@ def tag_flac_file(path: Path,
         if rel_ts:
             import datetime
             audio["date"] = [str(datetime.datetime.fromtimestamp(rel_ts).year)]
+    except Exception as e:
+        return False, f"setting tags failed: {e}"
 
-        if cover_data:
-            jpeg, mime, w, h = _normalize_cover(cover_data)
+    if cover_data:
+        try:
+            img_bytes, mime, w, h = _prepare_cover(cover_data, cover_mime)
             pic = Picture()
             pic.type   = 3          # COVER_FRONT
             pic.mime   = mime
             pic.desc   = "Cover"
             pic.width  = w
             pic.height = h
-            pic.depth  = 24         # 24-bit RGB JPEG
-            pic.colors = 0          # not indexed
-            pic.data   = jpeg
+            pic.depth  = 24
+            pic.colors = 0
+            pic.data   = img_bytes
             audio.clear_pictures()
             audio.add_picture(pic)
+        except Exception as e:
+            return False, f"building picture block failed: {e}"
 
+    try:
         audio.save()
-        return True
-    except Exception:
-        return False
+    except Exception as e:
+        return False, f"save failed: {e}"
+
+    return True, ""

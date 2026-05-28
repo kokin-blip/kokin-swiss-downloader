@@ -309,10 +309,12 @@ class API:
                 if not cover_data:
                     self._log("  No album cover available — file will have no thumbnail.", "warn")
 
-            # Write FLAC tags + embedded picture
-            tag_flac_file(out_file,
-                          track_info if embed_meta else {},
-                          cover_data, cover_mime or "image/jpeg")
+            # Write FLAC tags + embedded picture (verbose failure reasons)
+            ok, err = tag_flac_file(out_file,
+                                    track_info if embed_meta else {},
+                                    cover_data, cover_mime or "image/jpeg")
+            if not ok:
+                self._log(f"  ⚠ Tagging failed: {err}", "warn")
 
             # Rename to clean "Artist - Title.flac" if we have both
             final = out_file
@@ -326,19 +328,6 @@ class API:
                             renamed.unlink()
                         out_file.rename(renamed)
                     final = renamed
-                except Exception:
-                    pass
-
-            # Sidecar JPGs — Windows Explorer fallback when FLAC art doesn't render
-            if cover_data and final.suffix.lower() == ".flac":
-                try:
-                    sidecar = final.with_suffix(".jpg")
-                    sidecar.write_bytes(cover_data)
-                except Exception:
-                    pass
-                try:
-                    # folder.jpg makes the *folder* show the album cover in Explorer
-                    (final.parent / "folder.jpg").write_bytes(cover_data)
                 except Exception:
                     pass
 
