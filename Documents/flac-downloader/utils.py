@@ -66,6 +66,25 @@ def app_data_dir() -> Path:
     return d
 
 
+def _normalize_cover(data: bytes) -> tuple[bytes, str, int, int]:
+    """
+    Decode cover image with Pillow, re-encode as JPEG, return
+    (jpeg_bytes, "image/jpeg", width, height).
+    Falls back to the original data with guessed dimensions on failure.
+    """
+    try:
+        import io
+        from PIL import Image
+        img = Image.open(io.BytesIO(data))
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=92, optimize=True)
+        return out.getvalue(), "image/jpeg", img.width, img.height
+    except Exception:
+        return data, "image/jpeg", 600, 600
+
+
 def tag_flac_file(path: Path,
                   track_info: dict,
                   cover_data: Optional[bytes] = None,
@@ -74,6 +93,9 @@ def tag_flac_file(path: Path,
     Write Vorbis tags + optional cover art to a FLAC file using mutagen.
     track_info is a Qobuz API track dict (or any dict with the same keys).
     Returns True on success, False if mutagen is unavailable or tagging fails.
+
+    The PICTURE block is written with width/height/depth set so Windows
+    Explorer can recognize it as a file thumbnail.
     """
     try:
         from mutagen.flac import FLAC, Picture
@@ -99,10 +121,16 @@ def tag_flac_file(path: Path,
             audio["date"] = [str(datetime.datetime.fromtimestamp(rel_ts).year)]
 
         if cover_data:
-            pic        = Picture()
+            jpeg, mime, w, h = _normalize_cover(cover_data)
+            pic = Picture()
             pic.type   = 3          # COVER_FRONT
-            pic.mime   = cover_mime
-            pic.data   = cover_data
+            pic.mime   = mime
+            pic.desc   = "Cover"
+            pic.width  = w
+            pic.height = h
+            pic.depth  = 24         # 24-bit RGB JPEG
+            pic.colors = 0          # not indexed
+            pic.data   = jpeg
             audio.clear_pictures()
             audio.add_picture(pic)
 

@@ -318,6 +318,7 @@ class API:
                     ydl.download([url])
                 self._provider("ytdlp", "ok")
                 self._log(f"Done! Saved to: {output_dir}", "bright")
+                self._emit("success")
                 return
             except yt_dlp.utils.DownloadError as e:
                 err = str(e)
@@ -380,6 +381,7 @@ class API:
                             ydl.download([alt_url])
                         self._provider("ytdlp", "ok")
                         self._log(f"Done via {plat}! Saved to: {output_dir}", "bright")
+                        self._emit("success")
                         return
                     except Exception as e2:
                         self._log(f"  {plat} failed: {e2}", "warn")
@@ -457,6 +459,7 @@ class API:
 
                     self._provider("ytdlp", "ok")
                     self._log(f"Done via YouTube! Saved: {final.name if final else safe_name}", "bright")
+                    self._emit("success")
                     return
 
             # 4. SpotiFlac proxy (anonymous — no account needed)
@@ -505,6 +508,7 @@ class API:
                     final  = result if isinstance(result, Path) else out_file
                     self._log(f"Downloaded via {svc}: {final.name}", "bright")
                     self._log(f"Done! Saved to: {output_dir}", "bright")
+                    self._emit("success")
                     return
                 else:
                     self._provider("proxy", "fail")
@@ -545,6 +549,7 @@ class API:
                                     final  = result if isinstance(result, Path) else out_file
                                     self._log(f"Saved: {final.name}", "bright")
                                     self._log(f"Done! Saved to: {output_dir}", "bright")
+                                    self._emit("success")
                                     return
                                 else:
                                     self._provider("proxy", "fail")
@@ -641,6 +646,7 @@ class API:
                 ydl.download([url])
             self._provider("ytdlp", "ok")
             self._log(f"Done! Saved to: {output_dir}", "bright")
+            self._emit("success")
         except yt_dlp.utils.DownloadError as e:
             self._provider("ytdlp", "fail")
             err = str(e)
