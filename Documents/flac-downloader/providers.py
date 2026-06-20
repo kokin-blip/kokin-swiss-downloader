@@ -50,6 +50,30 @@ def is_drm_error(msg: str) -> bool:
     return any(re.search(p, msg, re.IGNORECASE) for p in _DRM_PATTERNS)
 
 
+_HTTP_ERRORS = [
+    (r'HTTP Error 410',           "This content has been deleted or removed from the site."),
+    (r'HTTP Error 404',           "Content not found — the URL may be wrong, or it was removed."),
+    (r'HTTP Error 403',           "Access denied — the site blocked this request (may require login or region)."),
+    (r'HTTP Error 401',           "Login required — this content is behind a paywall or members-only."),
+    (r'HTTP Error 429',           "Rate limited — the site is blocking too many requests. Try again later."),
+    (r'HTTP Error 5\d\d',         "The site returned a server error. Try again later."),
+    (r'private video',            "This video is private."),
+    (r'members.only|members only',  "This content is members-only."),
+    (r'age.?restrict',            "Age-restricted content — yt-dlp could not access it without login."),
+    (r'This video is unavailable',"This video is unavailable."),
+    (r'Video unavailable',        "Video unavailable."),
+    (r'confirm your age',         "Age verification required — cannot download without login cookies."),
+    (r'geo.?block|not available in your country', "This content is geo-blocked in your region."),
+]
+
+def friendly_dl_error(msg: str) -> str:
+    """Return a short human-readable message for common yt-dlp download errors."""
+    for pattern, friendly in _HTTP_ERRORS:
+        if re.search(pattern, msg, re.IGNORECASE):
+            return friendly
+    return None
+
+
 def extract_qobuz_id(url: str) -> Optional[str]:
     """Extract numeric track ID from a Qobuz URL (open.qobuz.com/track/12345…)."""
     m = re.search(r'qobuz\.com/(?:[a-z\-]+/)?track/(\d+)', url)

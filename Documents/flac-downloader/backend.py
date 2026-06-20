@@ -16,10 +16,10 @@ except ImportError:
 
 import settings as cfg
 from providers import (OdesliResolver, QobuzAPI, SpotiflacProxy,
-                       MusicBrainz, is_drm_error, extract_qobuz_id,
-                       fetch_spotify_metadata, lookup_album_cover,
-                       fetch_spotify_album_tracks, is_album_or_playlist_url,
-                       clean_url)
+                       MusicBrainz, is_drm_error, friendly_dl_error,
+                       extract_qobuz_id, fetch_spotify_metadata,
+                       lookup_album_cover, fetch_spotify_album_tracks,
+                       is_album_or_playlist_url, clean_url)
 from utils import find_ffmpeg, tag_flac_file, flac_cover_info
 from version import __version__, GITHUB_OWNER, GITHUB_REPO
 
@@ -720,7 +720,8 @@ class API:
             self._log("All providers exhausted — could not download this track.", "err")
 
         except Exception as exc:
-            self._log(f"ERROR: {exc}", "err")
+            msg = str(exc)
+            self._log(friendly_dl_error(msg) or f"ERROR: {msg}", "err")
         # NOTE: _downloading flag + 'done' event are reset by the outer _worker
         # so album loops can keep going across multiple track downloads.
 
@@ -806,10 +807,11 @@ class API:
             elif is_drm_error(err):
                 self._log("DRM-protected video — cannot bypass.", "err")
             else:
-                self._log(f"ERROR: {err}", "err")
+                self._log(friendly_dl_error(err) or f"ERROR: {err}", "err")
         except Exception as exc:
             self._provider("ytdlp", "fail")
-            self._log(f"ERROR: {exc}", "err")
+            msg = str(exc)
+            self._log(friendly_dl_error(msg) or f"ERROR: {msg}", "err")
         finally:
             self._downloading = False
             self._emit("done")
