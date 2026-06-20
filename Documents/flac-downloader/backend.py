@@ -27,6 +27,21 @@ DEFAULT_OUT       = str(Path.home() / "Music"  / "Swiss Downloads")
 DEFAULT_VIDEO_OUT = str(Path.home() / "Videos" / "Swiss Downloads")
 
 
+def _impersonate_target():
+    """
+    Return a yt-dlp ImpersonateTarget (Chrome) if curl_cffi is available.
+    Many sites (PornHub, etc.) block yt-dlp by its TLS/JA3 fingerprint and
+    return HTTP 410; impersonating a real browser's handshake bypasses that.
+    Returns None if curl_cffi isn't installed (e.g. running from source).
+    """
+    try:
+        import curl_cffi  # noqa: F401
+        from yt_dlp.networking.impersonate import ImpersonateTarget
+        return ImpersonateTarget.from_str("chrome")
+    except Exception:
+        return None
+
+
 class API:
     def __init__(self):
         self._window          = None
@@ -386,6 +401,8 @@ class API:
             }
             if ffmpeg_dir: opts["ffmpeg_location"] = str(ffmpeg_dir)
             if proxy:      opts["proxy"] = proxy
+            imp = _impersonate_target()
+            if imp:        opts["impersonate"] = imp
             return opts
 
         def fetch_cover(cover_url: str):
@@ -859,6 +876,8 @@ class API:
         if merge:      opts["merge_output_format"] = merge
         if ffmpeg_dir: opts["ffmpeg_location"]     = str(ffmpeg_dir)
         if proxy:      opts["proxy"]               = proxy
+        imp = _impersonate_target()
+        if imp:        opts["impersonate"]         = imp
 
         try:
             Path(output_dir).mkdir(parents=True, exist_ok=True)

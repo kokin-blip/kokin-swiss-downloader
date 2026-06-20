@@ -33,6 +33,7 @@ pyinstaller ^
   --add-binary "ffmpeg\ffmpeg.exe;ffmpeg" ^
   --collect-all pywebview ^
   --collect-all mutagen ^
+  --collect-all curl_cffi ^
   --icon icon.ico ^
   app.py
 

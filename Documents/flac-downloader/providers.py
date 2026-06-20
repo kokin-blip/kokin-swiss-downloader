@@ -51,7 +51,9 @@ def is_drm_error(msg: str) -> bool:
 
 
 _HTTP_ERRORS = [
-    (r'HTTP Error 410',           "This content has been deleted or removed from the site."),
+    (r'Redirection detected',     "This video isn't available here — it may be region-locked, require login, or have been removed."),
+    (r'require login|requires? (?:a )?login|Sign in to confirm|log ?in to', "This content requires being logged in — can't download it."),
+    (r'HTTP Error 410',           "This content was blocked or removed (the site refused the request)."),
     (r'HTTP Error 404',           "Content not found — the URL may be wrong, or it was removed."),
     (r'HTTP Error 403',           "Access denied — the site blocked this request (may require login or region)."),
     (r'HTTP Error 401',           "Login required — this content is behind a paywall or members-only."),
