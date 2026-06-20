@@ -724,9 +724,16 @@ hr.separator {
       <div class="prompt-body" style="flex-direction:column;gap:4px">
         <div style="font-weight:bold;font-size:12px">v<span id="updateModalVersion"></span> is ready to download</div>
         <div class="update-notes" id="updateModalNotes"></div>
+        <div id="updateProgress" style="display:none;margin-top:8px">
+          <div class="progress-wrap" style="height:18px">
+            <div class="progress-fill" id="updateProgressFill"></div>
+            <span class="progress-label" id="updateProgressLabel">0%</span>
+          </div>
+          <div class="label-sm" id="updateProgressMsg" style="margin-top:4px">&nbsp;</div>
+        </div>
       </div>
-      <div class="prompt-buttons">
-        <button class="btn" onclick="openUpdate();document.getElementById('updateOverlay').classList.remove('active')" style="font-weight:bold">Download</button>
+      <div class="prompt-buttons" id="updateButtons">
+        <button class="btn" id="updateInstallBtn" onclick="startInstall()" style="font-weight:bold">Update Now</button>
         <button class="btn" onclick="document.getElementById('updateOverlay').classList.remove('active')">Later</button>
       </div>
     </div>
@@ -1190,7 +1197,9 @@ async function pollUpdates() {
     if      (u.kind === 'log')            appendLog(u.msg, u.level);
     else if (u.kind === 'progress')       setProgress(u.pct, u.speed||0, u.eta||0, u.done||0, u.total||0);
     else if (u.kind === 'provider')       setProvider(u.key, u.state);
-    else if (u.kind === 'update_available') showUpdateBanner(u.version, u.notes, u.url);
+    else if (u.kind === 'update_available') showUpdateBanner(u.version, u.notes, u.url, u.asset_url);
+    else if (u.kind === 'update_progress')  onUpdateProgress(u.pct, u.msg);
+    else if (u.kind === 'update_ready')      api('close_window');
     else if (u.kind === 'success')          showSuccessStar();
     else if (u.kind === 'prompt')           showPrompt(u.question);
     else if (u.kind === 'album_progress')   setStatus(`Album: track ${u.current} of ${u.total}…`);
@@ -1244,11 +1253,16 @@ function showSuccessStar() {
 
 // ── Updates ───────────────────────────────────────────────────────────────────
 let _updateUrl = '';
+let _updateAssetUrl = '';
 
-function showUpdateBanner(version, notes, url) {
+function showUpdateBanner(version, notes, url, assetUrl) {
   _updateUrl = url;
+  _updateAssetUrl = assetUrl || '';
   document.getElementById('updateModalVersion').textContent = version;
   document.getElementById('updateModalNotes').textContent   = notes || '(no release notes)';
+  // If no .exe attached, fall back to "open page in browser"
+  document.getElementById('updateInstallBtn').textContent =
+    _updateAssetUrl ? 'Update Now' : 'Open Download Page';
   document.getElementById('updateOverlay').classList.add('active');
   // Also update the About section in Settings
   document.getElementById('changelogVersion').textContent   = version;
@@ -1270,6 +1284,42 @@ function showChangelog() {
 
 function openUpdate() {
   if (_updateUrl) window.open(_updateUrl, '_blank');
+}
+
+async function startInstall() {
+  // No bundled .exe → just open the release page in a browser
+  if (!_updateAssetUrl) {
+    openUpdate();
+    document.getElementById('updateOverlay').classList.remove('active');
+    return;
+  }
+  const r = await api('install_update', _updateAssetUrl);
+  if (!r.ok) {
+    // Running from source, or no asset — show the reason and offer the page
+    document.getElementById('updateProgressMsg').textContent = r.msg;
+    document.getElementById('updateProgress').style.display = 'block';
+    document.getElementById('updateInstallBtn').textContent = 'Open Download Page';
+    document.getElementById('updateInstallBtn').onclick = openUpdate;
+    return;
+  }
+  // Lock the dialog open and show progress
+  document.getElementById('updateInstallBtn').disabled = true;
+  document.getElementById('updateProgress').style.display = 'block';
+  startPolling();  // ensure we keep draining update_progress events
+}
+
+function onUpdateProgress(pct, msg) {
+  document.getElementById('updateProgress').style.display = 'block';
+  const fill = document.getElementById('updateProgressFill');
+  const lbl  = document.getElementById('updateProgressLabel');
+  if (pct < 0) {                         // error
+    document.getElementById('updateInstallBtn').disabled = false;
+    lbl.textContent = 'Failed';
+  } else {
+    fill.style.width = pct + '%';
+    lbl.textContent  = Math.round(pct) + '%';
+  }
+  if (msg) document.getElementById('updateProgressMsg').textContent = msg;
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────

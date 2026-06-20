@@ -92,8 +92,75 @@ class API:
                 self._emit("update_available",
                            version=info["version"],
                            notes=info["notes"],
-                           url=info["url"])
+                           url=info["url"],
+                           asset_url=info.get("asset_url", ""))
         threading.Thread(target=_run, daemon=True).start()
+
+    def install_update(self, asset_url: str) -> dict:
+        """Download the new .exe in the background, then swap + relaunch on exit."""
+        import os, tempfile, subprocess
+        import urllib.request
+
+        if not getattr(sys, "frozen", False):
+            return {"ok": False,
+                    "msg": "Auto-install only works in the built .exe. "
+                           "Running from source — pull the latest code instead."}
+        if not asset_url:
+            return {"ok": False,
+                    "msg": "This release has no downloadable .exe attached."}
+
+        current = sys.executable  # path to the running Swiss Downloader.exe
+
+        def _run():
+            try:
+                self._emit("update_progress", pct=0, msg="Connecting…")
+                tmp_new = os.path.join(tempfile.gettempdir(),
+                                       "SwissDownloader_update.exe")
+                req = urllib.request.Request(
+                    asset_url, headers={"User-Agent":
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    total = int(resp.headers.get("Content-Length", 0))
+                    done  = 0
+                    with open(tmp_new, "wb") as f:
+                        while True:
+                            chunk = resp.read(262144)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            done += len(chunk)
+                            pct = (done / total * 100) if total else 0
+                            self._emit("update_progress", pct=pct,
+                                       msg=f"Downloading… {done//1048576} MB"
+                                           + (f" / {total//1048576} MB" if total else ""))
+
+                self._emit("update_progress", pct=100,
+                           msg="Download complete. Restarting to install…")
+
+                # Batch waits for this exe to unlock, swaps it, relaunches, self-deletes.
+                bat = os.path.join(tempfile.gettempdir(),
+                                   "SwissDownloader_update.bat")
+                with open(bat, "w") as f:
+                    f.write(
+                        "@echo off\r\n"
+                        ":retry\r\n"
+                        f'move /Y "{tmp_new}" "{current}" >nul 2>&1\r\n'
+                        "if errorlevel 1 (\r\n"
+                        "  timeout /t 1 /nobreak >nul\r\n"
+                        "  goto retry\r\n"
+                        ")\r\n"
+                        f'start "" "{current}"\r\n'
+                        'del "%~f0"\r\n'
+                    )
+                subprocess.Popen(["cmd", "/c", bat],
+                                 creationflags=0x08000000)  # CREATE_NO_WINDOW
+                self._emit("update_ready")  # tells JS to close the window
+            except Exception as e:
+                self._emit("update_progress", pct=-1,
+                           msg=f"Update failed: {e}")
+
+        threading.Thread(target=_run, daemon=True).start()
+        return {"ok": True}
 
     def browse_folder(self) -> str:
         import webview

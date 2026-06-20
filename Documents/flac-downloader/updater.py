@@ -58,9 +58,16 @@ def check(proxy: Optional[str] = None) -> Optional[dict]:
 
     if _parse(latest_tag) > _parse(__version__):
         notes = data.get("body", "").strip()
+        # Find the .exe asset for in-app download, if present
+        asset_url = ""
+        for asset in data.get("assets", []):
+            if (asset.get("name", "").lower().endswith(".exe")):
+                asset_url = asset.get("browser_download_url", "")
+                break
         return {
-            "version": latest_tag.lstrip("v"),
-            "notes":   notes[:2000],          # cap to avoid giant changelogs
-            "url":     data.get("html_url", ""),
+            "version":   latest_tag.lstrip("v"),
+            "notes":     notes[:2000],          # cap to avoid giant changelogs
+            "url":       data.get("html_url", ""),
+            "asset_url": asset_url,
         }
     return None
