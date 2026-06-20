@@ -4,7 +4,7 @@ build, look each one up on iTunes by tags, embed the proper album cover,
 and delete the leftover .jpg sidecars + folder.jpg next to them.
 
 Usage:
-    python retag_existing.py "C:\\Users\\erick\\Music\\Swiss Downloads"
+    python retag_existing.py "C:\\Users\\<you>\\Music\\Swiss Downloads"
 """
 
 import sys

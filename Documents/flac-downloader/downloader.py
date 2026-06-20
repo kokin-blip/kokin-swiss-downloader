@@ -37,7 +37,7 @@ except ImportError:
 
 console = Console()
 
-FFMPEG_PATH = Path(r"C:\Users\erick\.spotiflac\ffmpeg.exe")
+FFMPEG_PATH = Path.home() / ".spotiflac" / "ffmpeg.exe"
 DEFAULT_OUTPUT = Path.home() / "Music" / "FLAC Downloads"
 
 DISCLAIMER = """[bold yellow]⚠  LEGAL DISCLAIMER[/bold yellow]
