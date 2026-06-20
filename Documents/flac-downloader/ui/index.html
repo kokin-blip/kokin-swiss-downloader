@@ -1322,8 +1322,12 @@ async function init() {
     statusEl.textContent = 'Checking for updates…';
     statusEl.style.color = 'var(--win-dark)';
     api('check_for_updates');
-    // One-shot poll after 5s to catch the update result
-    setTimeout(pollUpdates, 5000);
+    // Poll every 2s for 30s to catch the update result whenever it arrives
+    let _updateInitPolls = 0;
+    const _updateInitTimer = setInterval(async () => {
+      await pollUpdates();
+      if (++_updateInitPolls >= 15) clearInterval(_updateInitTimer);
+    }, 2000);
   } else {
     statusEl.textContent = 'Update check not configured (set GITHUB_OWNER/REPO in version.py)';
     statusEl.style.color = 'gray';
