@@ -334,7 +334,10 @@ class API:
                 if not m.startswith("[debug]"): self.cb(m, "dim")
             def info(self, m):   self.cb(m, "dim")
             def warning(self, m): self.cb(m, "warn")
-            def error(self, m):  self.cb(m, "err"); self.errors.append(m)
+            def error(self, m):
+                self.errors.append(m)
+                # Suppress raw dump if a friendly message will be shown instead
+                if not friendly_dl_error(m): self.cb(m, "err")
 
         # Map UI format → (yt-dlp preferredcodec, preferredquality)
         # For FLAC the quality param is the compression level (0–12).
@@ -816,7 +819,8 @@ class API:
                 if not m.startswith("[debug]"): self.cb(m, "dim")
             def info(self, m):    self.cb(m, "dim")
             def warning(self, m): self.cb(m, "warn")
-            def error(self, m):   self.cb(m, "err")
+            def error(self, m):
+                if not friendly_dl_error(m): self.cb(m, "err")
 
         # Build format string + merge container
         height = "" if quality == "best" else f"[height<={quality}]"
