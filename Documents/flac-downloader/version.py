@@ -1,4 +1,4 @@
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 
 # ── Fill these in once you create your GitHub repo ────────────────────────────
 # e.g. https://github.com/your-username/swiss-downloader
