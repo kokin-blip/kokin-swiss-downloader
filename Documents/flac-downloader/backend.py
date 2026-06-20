@@ -4,7 +4,9 @@ All public methods are callable from JS via window.pywebview.api.<method>().
 Progress updates are pushed into a queue and drained by JS polling poll_updates().
 """
 
+import os
 import queue
+import re
 import threading
 from pathlib import Path
 import sys
@@ -40,6 +42,75 @@ def _impersonate_target():
         return ImpersonateTarget.from_str("chrome")
     except Exception:
         return None
+
+
+def _browser_grab(page_url, log, timeout=60):
+    """
+    Load page_url in a real headless browser, let the site's own JS decrypt
+    and request the stream, and return (m3u8_url, referer) sniffed off the
+    network. Used as a fallback for sites whose encrypted/obfuscated players
+    yt-dlp can't extract. Returns (None, None) on failure.
+
+    The Chromium binary is bundled into the frozen exe via PyInstaller; setting
+    PLAYWRIGHT_BROWSERS_PATH=0 makes Playwright look for it inside its own
+    (unpacked) package directory rather than the user's ms-playwright cache.
+    """
+    if getattr(sys, "frozen", False):
+        os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:
+        log("Browser grab unavailable (Playwright not bundled in this build).", "warn")
+        return None, None
+
+    import time as _t
+    found = []  # (url, referer)
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=[
+                "--autoplay-policy=no-user-gesture-required",
+                "--disable-blink-features=AutomationControlled",
+            ])
+            ctx = browser.new_context(
+                user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/124.0.0.0 Safari/537.36"),
+                viewport={"width": 1280, "height": 720},
+            )
+            page = ctx.new_page()
+
+            def on_request(req):
+                if ".m3u8" in req.url.split("?")[0].lower():
+                    ref = req.headers.get("referer") or page_url
+                    if (req.url, ref) not in found:
+                        found.append((req.url, ref))
+
+            page.on("request", on_request)
+            try:
+                page.goto(page_url, wait_until="domcontentloaded", timeout=timeout * 1000)
+            except Exception:
+                pass
+            for sel in ("video", ".vjs-big-play-button", "button[aria-label*=play i]",
+                        ".play", "#root", "body"):
+                try:
+                    page.click(sel, timeout=1500)
+                    break
+                except Exception:
+                    continue
+            deadline = _t.time() + timeout
+            while not found and _t.time() < deadline:
+                page.wait_for_timeout(500)
+            browser.close()
+    except Exception as e:
+        log(f"Browser grab error: {e}", "warn")
+        return None, None
+
+    if not found:
+        return None, None
+    for url, ref in found:
+        if "master" in url.lower():
+            return url, ref
+    return found[0]
 
 
 class API:
@@ -812,6 +883,33 @@ class API:
         # NOTE: _downloading flag + 'done' event are reset by the outer _worker
         # so album loops can keep going across multiple track downloads.
 
+    def _video_browser_fallback(self, page_url, opts, output_dir):
+        """When yt-dlp can't extract a site, drive a real browser to sniff the
+        stream, then download that m3u8 with the correct Referer/Origin."""
+        self._log("Trying browser grab (loading the page in a real browser)...", "warn")
+        m3u8, ref = _browser_grab(page_url, self._log)
+        if not m3u8:
+            self._log("Browser grab found no downloadable stream "
+                      "(the player may use real DRM).", "err")
+            return False
+        from urllib.parse import urlparse
+        origin = f"{urlparse(ref).scheme}://{urlparse(ref).netloc}"
+        opts2 = dict(opts)
+        opts2["http_headers"] = {"Referer": ref, "Origin": origin}
+        try:
+            self._log("Found stream via browser - downloading...", "ok")
+            self._provider("ytdlp", "active")
+            with yt_dlp.YoutubeDL(opts2) as ydl:
+                ydl.download([m3u8])
+            self._provider("ytdlp", "ok")
+            self._log(f"Done! Saved to: {output_dir}", "bright")
+            self._emit("success")
+            return True
+        except Exception as e:
+            self._provider("ytdlp", "fail")
+            self._log(friendly_dl_error(str(e)) or f"ERROR: {e}", "err")
+            return False
+
     def _worker_video(self, url, output_dir, video_format, quality,
                       embed_thumb, embed_meta, write_subs):
         s          = cfg.load()
@@ -896,6 +994,10 @@ class API:
                 self._log("Aborted.", "warn")
             elif is_drm_error(err):
                 self._log("DRM-protected video — cannot bypass.", "err")
+            elif re.search(r"Unsupported URL|Cloudflare|No video formats|Unable to extract",
+                           err, re.I):
+                if not self._video_browser_fallback(url, opts, output_dir):
+                    self._log(friendly_dl_error(err) or f"ERROR: {err}", "err")
             else:
                 self._log(friendly_dl_error(err) or f"ERROR: {err}", "err")
         except Exception as exc:

@@ -4,6 +4,14 @@ setlocal
 echo Installing/updating PyInstaller...
 python -m pip install pyinstaller --quiet
 
+REM ── Bundle a browser for the in-app "browser grab" fallback ──────────────────
+REM PLAYWRIGHT_BROWSERS_PATH=0 installs Chromium INTO the playwright package so
+REM PyInstaller's --collect-all picks it up. Runtime sets the same env var.
+echo Installing Playwright + bundled Chromium...
+set PLAYWRIGHT_BROWSERS_PATH=0
+python -m pip install playwright --quiet
+python -m playwright install chromium
+
 REM ── Ensure ffmpeg.exe is present ─────────────────────────────────────────────
 if not exist "ffmpeg\ffmpeg.exe" (
   echo.
@@ -34,6 +42,7 @@ pyinstaller ^
   --collect-all pywebview ^
   --collect-all mutagen ^
   --collect-all curl_cffi ^
+  --collect-all playwright ^
   --icon icon.ico ^
   app.py
 
