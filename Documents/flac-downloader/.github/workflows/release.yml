@@ -31,10 +31,26 @@ jobs:
           Get-ChildItem -Path ffmpeg-tmp -Recurse -Filter ffmpeg.exe | Select-Object -First 1 | Copy-Item -Destination ffmpeg\ffmpeg.exe
           Remove-Item -Recurse -Force ffmpeg-tmp
 
+      # PLAYWRIGHT_BROWSERS_PATH=0 installs Chromium INSIDE the playwright
+      # package so --collect-all picks it up; the app sets the same variable at
+      # runtime when frozen. Without this the browser-grab and site sign-in
+      # fallbacks are dead in the shipped exe.
+      - name: Install Playwright Chromium
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: "0"
+        run: |
+          python -m playwright install chromium
+
       - name: Generate icon
         run: python make_icon.py
 
+      # Keep these flags in sync with build.bat. curl_cffi provides the TLS
+      # impersonation that gets past HTTP 410 fingerprint blocks, and playwright
+      # carries the bundled browser; dropping either produces an exe that looks
+      # fine until it silently fails on the sites those exist for.
       - name: Build exe
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: "0"
         run: |
           pyinstaller `
             --onefile `
@@ -44,8 +60,24 @@ jobs:
             --add-binary "ffmpeg\ffmpeg.exe;ffmpeg" `
             --collect-all pywebview `
             --collect-all mutagen `
+            --collect-all curl_cffi `
+            --collect-all playwright `
             --icon icon.ico `
             app.py
+
+      - name: Verify the build produced an exe
+        run: |
+          if (-not (Test-Path "dist\Swiss Downloader.exe")) {
+            throw "Build produced no exe -- refusing to publish a release."
+          }
+          $mb = [math]::Round((Get-Item "dist\Swiss Downloader.exe").Length / 1MB)
+          Write-Output "Built exe: $mb MB"
+          # A build missing the bundled Chromium still succeeds but comes out a
+          # few hundred MB lighter, which is the only cheap signal that one of
+          # the --collect-all flags above silently stopped working.
+          if ($mb -lt 200) {
+            throw "Exe is only $mb MB -- the bundled browser is probably missing."
+          }
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
