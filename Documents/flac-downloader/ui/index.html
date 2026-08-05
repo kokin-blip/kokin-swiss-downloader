@@ -911,6 +911,16 @@ hr.separator {
         </div>
 
         <hr class="separator">
+        <div class="section-title">Troubleshooting</div>
+
+        <div class="form-group mt4">
+          <label><input type="checkbox" id="sDebugLog"> Write a debug log</label>
+          <div class="label-sm">Saves error details to a file so a failing download can be
+            diagnosed. Off by default; leave it off unless you're chasing a problem.</div>
+          <div class="label-sm mt4" id="sDebugLogPath" style="word-break:break-all"></div>
+        </div>
+
+        <hr class="separator">
         <div class="flex-row mt4">
           <button class="btn" onclick="saveSettings()" style="font-weight:bold;min-width:100px">Save</button>
           <span id="saveResult" class="label-sm" style="margin-left:8px"></span>
@@ -1329,6 +1339,7 @@ async function saveSettings() {
     qobuzFormat:  parseInt(fmt, 10),
     autoFallback: document.getElementById('sAutoFallback').checked,
     proxy:        document.getElementById('sProxy').value.trim(),
+    debugLog:     document.getElementById('sDebugLog').checked,
   };
   const r = await api('save_settings', data);
   const el = document.getElementById('saveResult');
@@ -1350,6 +1361,8 @@ async function init() {
   // Settings tab pre-fill
   document.getElementById('sAutoFallback').checked = d.autoFallback;
   document.getElementById('sProxy').value          = d.proxy || '';
+  document.getElementById('sDebugLog').checked     = !!d.debugLog;
+  document.getElementById('sDebugLogPath').textContent = d.debugLogPath ? `Log: ${d.debugLogPath}` : '';
   const fmtRadio = document.querySelector(`input[name=fmt][value="${d.qobuzFormat}"]`);
   if (fmtRadio) fmtRadio.checked = true;
 

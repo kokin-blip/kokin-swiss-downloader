@@ -51,11 +51,11 @@ def is_drm_error(msg: str) -> bool:
 
 
 _HTTP_ERRORS = [
-    (r'Unsupported URL',          "This site isn't supported — its player encrypts the video, so it can't be downloaded."),
+    (r'Unsupported URL',          "This site isn't directly supported, and no playable stream could be found on the page."),
     (r'Cloudflare',               "This site is behind Cloudflare bot protection. Make sure you're on the latest version of Swiss Downloader (older builds can't get past it)."),
     (r'Redirection detected',     "This video isn't available here — it may be region-locked, require login, or have been removed."),
     (r'require login|requires? (?:a )?login|Sign in to confirm|log ?in to', "This content requires being logged in — can't download it."),
-    (r'HTTP Error 410',           "This content was blocked or removed (the site refused the request)."),
+    (r'HTTP Error 410',           "The site refused the request (HTTP 410) — it may be region-locked, need a login, or be blocking automated downloads."),
     (r'HTTP Error 404',           "Content not found — the URL may be wrong, or it was removed."),
     (r'HTTP Error 403',           "Access denied — the site blocked this request (may require login or region)."),
     (r'HTTP Error 401',           "Login required — this content is behind a paywall or members-only."),

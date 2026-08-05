@@ -8,6 +8,7 @@ import os
 import queue
 import re
 import threading
+import traceback
 from pathlib import Path
 import sys
 
@@ -22,34 +23,70 @@ from providers import (OdesliResolver, QobuzAPI, SpotiflacProxy,
                        extract_qobuz_id, fetch_spotify_metadata,
                        lookup_album_cover, fetch_spotify_album_tracks,
                        is_album_or_playlist_url, clean_url)
-from utils import find_ffmpeg, tag_flac_file, flac_cover_info
+from utils import (find_ffmpeg, tag_flac_file, flac_cover_info,
+                   debug_log, debug_enabled, set_debug, debug_log_path)
 from version import __version__, GITHUB_OWNER, GITHUB_REPO
 
 DEFAULT_OUT       = str(Path.home() / "Music"  / "Swiss Downloads")
 DEFAULT_VIDEO_OUT = str(Path.home() / "Videos" / "Swiss Downloads")
 
 
+# User-Agent presented by the headless browser during a grab. The subsequent
+# yt-dlp fetch of the sniffed stream must send the same one — CDNs routinely
+# reject a playlist/segment request whose UA doesn't match the session that
+# asked for it (typically with 403 or 410).
+_BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+               "AppleWebKit/537.36 (KHTML, like Gecko) "
+               "Chrome/124.0.0.0 Safari/537.36")
+
+# Why impersonation is unavailable, if it is. Set by _impersonate_target() so
+# callers can tell the user "no impersonation" apart from "it didn't help".
+_impersonate_note = None
+
+
 def _impersonate_target():
     """
     Return a yt-dlp ImpersonateTarget (Chrome) if curl_cffi is available.
     Many sites (PornHub, etc.) block yt-dlp by its TLS/JA3 fingerprint and
-    return HTTP 410; impersonating a real browser's handshake bypasses that.
-    Returns None if curl_cffi isn't installed (e.g. running from source).
+    return HTTP 403/410; impersonating a real browser's handshake bypasses that.
+    Returns None if curl_cffi isn't installed (e.g. running from source),
+    recording the reason in _impersonate_note.
     """
+    global _impersonate_note
     try:
         import curl_cffi  # noqa: F401
-        from yt_dlp.networking.impersonate import ImpersonateTarget
-        return ImpersonateTarget.from_str("chrome")
-    except Exception:
+    except Exception as e:
+        _impersonate_note = (f"curl_cffi unavailable ({e}) — using yt-dlp's own TLS "
+                             "fingerprint, which some sites block.")
         return None
+    try:
+        from yt_dlp.networking.impersonate import ImpersonateTarget
+        target = ImpersonateTarget.from_str("chrome")
+    except Exception as e:
+        _impersonate_note = f"browser impersonation unavailable ({e})."
+        return None
+    _impersonate_note = None
+    return target
 
 
-def _browser_grab(page_url, log, timeout=60):
+_PLAY_SELECTORS = ("video", ".vjs-big-play-button", "button[aria-label*=play i]",
+                   ".play", ".play-button", "#player", "#root", "body")
+
+
+def _browser_grab(page_url, log, timeout=60, attempts=3, should_abort=None):
     """
     Load page_url in a real headless browser, let the site's own JS decrypt
-    and request the stream, and return (m3u8_url, referer) sniffed off the
-    network. Used as a fallback for sites whose encrypted/obfuscated players
-    yt-dlp can't extract. Returns (None, None) on failure.
+    and request the stream, and return (m3u8_url, referer, page_title) sniffed
+    off the network. Used as a fallback for sites whose encrypted/obfuscated
+    players yt-dlp can't extract. Returns (None, None, None) on failure.
+
+    page_title is captured because a bare m3u8 carries no metadata — without it
+    the download lands as "NA - <playlist-id>".
+
+    Lazy players are the main source of flakiness here, so we keep poking every
+    plausible play target for a while instead of clicking once on whichever
+    selector happens to match first (often `body`, which does nothing), and we
+    retry the whole session before giving up.
 
     The Chromium binary is bundled into the frozen exe via PyInstaller; setting
     PLAYWRIGHT_BROWSERS_PATH=0 makes Playwright look for it inside its own
@@ -61,20 +98,21 @@ def _browser_grab(page_url, log, timeout=60):
         from playwright.sync_api import sync_playwright
     except Exception:
         log("Browser grab unavailable (Playwright not bundled in this build).", "warn")
-        return None, None
+        return None, None, None
 
     import time as _t
-    found = []  # (url, referer)
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=[
-                "--autoplay-policy=no-user-gesture-required",
-                "--disable-blink-features=AutomationControlled",
-            ])
+    aborted = should_abort or (lambda: False)
+
+    def _attempt(p):
+        found = []  # (url, referer)
+        title = None
+        browser = p.chromium.launch(headless=True, args=[
+            "--autoplay-policy=no-user-gesture-required",
+            "--disable-blink-features=AutomationControlled",
+        ])
+        try:
             ctx = browser.new_context(
-                user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                            "AppleWebKit/537.36 (KHTML, like Gecko) "
-                            "Chrome/124.0.0.0 Safari/537.36"),
+                user_agent=_BROWSER_UA,
                 viewport={"width": 1280, "height": 720},
             )
             page = ctx.new_page()
@@ -86,31 +124,63 @@ def _browser_grab(page_url, log, timeout=60):
                         found.append((req.url, ref))
 
             page.on("request", on_request)
+            # Cap the navigation itself well below the overall budget: when the
+            # load fails outright the page stays blank, and waiting out the full
+            # timeout clicking nothing just burns the retry budget.
             try:
-                page.goto(page_url, wait_until="domcontentloaded", timeout=timeout * 1000)
+                page.goto(page_url, wait_until="domcontentloaded",
+                          timeout=min(30, timeout) * 1000)
+            except Exception as e:
+                log(f"Browser grab: page load failed ({str(e).splitlines()[0][:90]})", "warn")
+                # Return whatever was already sniffed during navigation — a page
+                # can fire the manifest and still fail to settle.
+                return found, None
+
+            deadline   = _t.time() + timeout
+            stop_click = _t.time() + min(20, timeout)  # then just listen
+            # Each selector is clicked at most once. Re-clicking <video> on a
+            # later pass would toggle playback back off, and blind-clicking
+            # body/#root repeatedly can hit an overlay and navigate away.
+            pending = list(_PLAY_SELECTORS)
+            while not found and _t.time() < deadline and not aborted():
+                if pending and _t.time() < stop_click:
+                    sel = pending.pop(0)
+                    try:
+                        page.click(sel, timeout=700)
+                    except Exception:
+                        pass
+                page.wait_for_timeout(500)
+            try:
+                title = page.title() or None
             except Exception:
                 pass
-            for sel in ("video", ".vjs-big-play-button", "button[aria-label*=play i]",
-                        ".play", "#root", "body"):
-                try:
-                    page.click(sel, timeout=1500)
-                    break
-                except Exception:
-                    continue
-            deadline = _t.time() + timeout
-            while not found and _t.time() < deadline:
-                page.wait_for_timeout(500)
-            browser.close()
-    except Exception as e:
-        log(f"Browser grab error: {e}", "warn")
-        return None, None
+        finally:
+            try:
+                browser.close()
+            except Exception:
+                pass
+        return found, title
 
-    if not found:
-        return None, None
-    for url, ref in found:
-        if "master" in url.lower():
-            return url, ref
-    return found[0]
+    for i in range(1, attempts + 1):
+        if aborted():
+            return None, None, None
+        found, title = [], None
+        try:
+            with sync_playwright() as p:
+                found, title = _attempt(p)
+        except Exception as e:
+            # Crashes (driver spawn, "Target crashed", page closed mid-wait) are
+            # exactly what the retries are for, so keep going rather than bail.
+            log(f"Browser grab error: {str(e).splitlines()[0][:120]}", "warn")
+        if found:
+            for url, ref in found:
+                if "master" in url.lower():
+                    return url, ref, title
+            return found[0][0], found[0][1], title
+        if i < attempts and not aborted():
+            log(f"Browser grab found nothing (attempt {i}/{attempts}) — retrying...", "warn")
+
+    return None, None, None
 
 
 class API:
@@ -122,6 +192,9 @@ class API:
         # Synchronous-prompt support: worker thread blocks on _prompt_event until JS replies
         self._prompt_event    = threading.Event()
         self._prompt_response = True
+        set_debug(cfg.load().get("debug_log", False))
+        debug_log(f"--- Swiss Downloader {__version__} started "
+                  f"(log: {debug_log_path()}) ---")
 
     def set_window(self, window):
         self._window = window
@@ -148,6 +221,8 @@ class API:
             "autoFallback":     s.get("auto_fallback", True),
             "qobuzFormat":      s.get("qobuz_format", 6),
             "proxy":            s.get("proxy", ""),
+            "debugLog":         s.get("debug_log", False),
+            "debugLogPath":     str(debug_log_path()),
             "spotiflacFound":   sf.found(),          # always True (built-in fallback)
             "spotiflacLocalDb": sf.has_local_db(),   # true if user has ~/.spotiflac/
             "spotiflacSvcs":    [name for name, _ in sf.services()],
@@ -161,11 +236,15 @@ class API:
         s = cfg.load()
         for key, dest in [("autoFallback", "auto_fallback"),
                           ("qobuzFormat",  "qobuz_format"),
-                          ("proxy",        "proxy")]:
+                          ("proxy",        "proxy"),
+                          ("debugLog",     "debug_log")]:
             if key in data:
                 val = data[key]
                 s[dest] = int(val) if dest == "qobuz_format" else val
         cfg.save(s)
+        # Apply immediately: API is constructed once, so without this the
+        # toggle would not take effect until the app was restarted.
+        set_debug(s.get("debug_log", False))
         return {"ok": True, "msg": "Settings saved."}
 
     def check_for_updates(self) -> None:
@@ -397,6 +476,11 @@ class API:
         s          = cfg.load()
         proxy      = s.get("proxy") or None
         ffmpeg_dir = find_ffmpeg()
+
+        # Reported once per track rather than inside make_opts(), which the
+        # provider chain calls repeatedly.
+        if _impersonate_target() is None and _impersonate_note:
+            self._log(f"Note: {_impersonate_note}", "warn")
 
         def ydl_hook(d):
             if self._abort_flag:
@@ -879,6 +963,8 @@ class API:
 
         except Exception as exc:
             msg = str(exc)
+            if debug_enabled():
+                debug_log(f"audio error for {url}\n{traceback.format_exc()}")
             self._log(friendly_dl_error(msg) or f"ERROR: {msg}", "err")
         # NOTE: _downloading flag + 'done' event are reset by the outer _worker
         # so album loops can keep going across multiple track downloads.
@@ -887,7 +973,12 @@ class API:
         """When yt-dlp can't extract a site, drive a real browser to sniff the
         stream, then download that m3u8 with the correct Referer/Origin."""
         self._log("Trying browser grab (loading the page in a real browser)...", "warn")
-        m3u8, ref = _browser_grab(page_url, self._log)
+        m3u8, ref, title = _browser_grab(page_url, self._log,
+                                         should_abort=lambda: self._abort_flag)
+        debug_log(f"browser grab {page_url} -> m3u8={m3u8} ref={ref} title={title!r}")
+        if self._abort_flag:
+            self._log("Aborted.", "warn")
+            return True   # nothing failed; the user stopped it
         if not m3u8:
             self._log("Browser grab found no downloadable stream "
                       "(the player may use real DRM).", "err")
@@ -895,7 +986,40 @@ class API:
         from urllib.parse import urlparse
         origin = f"{urlparse(ref).scheme}://{urlparse(ref).netloc}"
         opts2 = dict(opts)
-        opts2["http_headers"] = {"Referer": ref, "Origin": origin}
+        # Merge, don't replace: the original headers (and the impersonation
+        # target, still on opts2) are what got us past the site's bot check.
+        hdrs = {**opts.get("http_headers", {}), "Referer": ref, "Origin": origin}
+        # Only pin the browser's UA when we are NOT impersonating. yt-dlp strips
+        # a User-Agent only when it matches std_headers exactly, so forcing one
+        # here would ship our UA over curl_cffi's unrelated TLS fingerprint —
+        # the exact mismatch that makes strict CDNs answer 403/410.
+        if not opts2.get("impersonate"):
+            hdrs["User-Agent"] = _BROWSER_UA
+        opts2["http_headers"] = hdrs
+        # A bare m3u8 has no uploader/title of its own, so the default template
+        # would yield "NA - <playlist-id>". Prefer the page title, else the slug.
+        slug = urlparse(page_url).path.rstrip("/").rsplit("/", 1)[-1] or "video"
+        safe = yt_dlp.utils.sanitize_filename(title or slug, restricted=False)
+        # Plenty of player pages share one constant <title> ("Watch", the site
+        # name). Without this, the second video would collide with the first and
+        # yt-dlp would skip it while still reporting success.
+        if title and Path(output_dir).exists():
+            stem, n = safe, 2
+            while any(p.stem == safe for p in Path(output_dir).glob(f"{stem}*")):
+                safe = f"{stem} ({n})"
+                n += 1
+        opts2["outtmpl"] = str(Path(output_dir) / f"{safe}.%(ext)s")
+        # Sniffed streams are HLS with hundreds of small fragments, and the
+        # impersonated transport roughly halves per-connection throughput.
+        # Fetching a few at a time turns a multi-hour download into minutes.
+        opts2.setdefault("concurrent_fragment_downloads", 5)
+        # Inherited from the page-level opts but meaningless for a bare
+        # manifest: there is no thumbnail or subtitle track to fetch.
+        opts2["writethumbnail"] = False
+        opts2["writesubtitles"] = False
+        opts2["subtitleslangs"] = []
+        opts2["postprocessors"] = [pp for pp in opts.get("postprocessors", [])
+                                   if pp.get("key") != "EmbedThumbnail"]
         try:
             self._log("Found stream via browser - downloading...", "ok")
             self._provider("ytdlp", "active")
@@ -907,6 +1031,8 @@ class API:
             return True
         except Exception as e:
             self._provider("ytdlp", "fail")
+            if debug_enabled():
+                debug_log(f"browser-grab download failed for {m3u8}\n{traceback.format_exc()}")
             self._log(friendly_dl_error(str(e)) or f"ERROR: {e}", "err")
             return False
 
@@ -976,6 +1102,8 @@ class API:
         if proxy:      opts["proxy"]               = proxy
         imp = _impersonate_target()
         if imp:        opts["impersonate"]         = imp
+        elif _impersonate_note:
+            self._log(f"Note: {_impersonate_note}", "warn")
 
         try:
             Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -990,11 +1118,20 @@ class API:
         except yt_dlp.utils.DownloadError as e:
             self._provider("ytdlp", "fail")
             err = str(e)
+            if debug_enabled():
+                debug_log(f"video DownloadError for {url}\n{traceback.format_exc()}")
             if "Aborted" in err:
                 self._log("Aborted.", "warn")
             elif is_drm_error(err):
                 self._log("DRM-protected video — cannot bypass.", "err")
-            elif re.search(r"Unsupported URL|Cloudflare|No video formats|Unable to extract",
+            # 410 belongs here too: sites that hide the stream behind JS and
+            # fingerprint their edge answer the page fetch that way, and the
+            # browser grab is the only thing that gets past it. 403 is
+            # deliberately NOT here — on supported sites it almost always means
+            # age-gate/login/region/expired-fragment, which a browser grab
+            # cannot fix and would only stall on for minutes.
+            elif re.search(r"Unsupported URL|Cloudflare|No video formats|Unable to extract"
+                           r"|HTTP Error 410",
                            err, re.I):
                 if not self._video_browser_fallback(url, opts, output_dir):
                     self._log(friendly_dl_error(err) or f"ERROR: {err}", "err")
@@ -1003,6 +1140,8 @@ class API:
         except Exception as exc:
             self._provider("ytdlp", "fail")
             msg = str(exc)
+            if debug_enabled():
+                debug_log(f"video error for {url}\n{traceback.format_exc()}")
             self._log(friendly_dl_error(msg) or f"ERROR: {msg}", "err")
         finally:
             self._downloading = False

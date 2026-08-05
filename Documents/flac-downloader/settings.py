@@ -11,6 +11,7 @@ DEFAULTS: dict = {
     "auto_fallback":  True,
     "qobuz_format":   6,   # 6=FLAC16  7=FLAC24/96  27=FLAC24/192
     "proxy":          "",  # e.g. "http://127.0.0.1:8080" or "socks5://..."
+    "debug_log":      False,  # write tracebacks to app_data_dir()/logs/
 }
 
 

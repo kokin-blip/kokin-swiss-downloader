@@ -1,7 +1,9 @@
 """Shared utilities — ffmpeg detection, app data directory, FLAC tagging."""
 
+import os
 import sys
 import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -64,6 +66,56 @@ def app_data_dir() -> Path:
         d = Path.home() / ".flac-downloader"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+_debug_enabled = os.environ.get("SWISSDL_DEBUG") not in (None, "", "0")
+
+
+_LOG_MAX_BYTES = 1_000_000
+
+
+def set_debug(on: bool) -> None:
+    """Enable/disable the debug log. SWISSDL_DEBUG=1 forces it on regardless."""
+    global _debug_enabled
+    _debug_enabled = bool(on) or os.environ.get("SWISSDL_DEBUG") not in (None, "", "0")
+
+
+def debug_enabled() -> bool:
+    """
+    Guard expensive call arguments, e.g.:
+        if debug_enabled(): debug_log(traceback.format_exc())
+    format_exc() walks the stack and reads source files off disk, so building
+    it unconditionally would cost on every error in the shipped (disabled) build.
+    """
+    return _debug_enabled
+
+
+def debug_log_path() -> Path:
+    return app_data_dir() / "logs" / "swiss-downloader.log"
+
+
+def debug_log(msg: str) -> None:
+    """
+    Append a timestamped line to the debug log, if enabled.
+
+    The shipped build is --windowed, so stderr and every traceback are
+    discarded — without this there is no way to get a real error off a
+    user's machine. Never raises: logging must not break a download.
+    """
+    if not _debug_enabled:
+        return
+    try:
+        p = debug_log_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        # Single-step rotation: a failing album can write hundreds of
+        # tracebacks, and an unbounded file stops being useful for triage.
+        if p.exists() and p.stat().st_size > _LOG_MAX_BYTES:
+            p.replace(p.with_suffix(".log.1"))
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with p.open("a", encoding="utf-8") as fh:
+            fh.write(f"[{ts}] {msg}\n")
+    except Exception:
+        pass
 
 
 def flac_cover_info(path: Path) -> dict:
