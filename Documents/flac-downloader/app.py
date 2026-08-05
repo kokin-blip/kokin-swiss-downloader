@@ -7,6 +7,7 @@ import os
 import sys
 import webview
 from backend import API
+from utils import WINDOW_TITLE
 
 def main():
     api        = API()
@@ -15,7 +16,8 @@ def main():
     html_path  = os.path.join(base_dir, "ui", "index.html")
 
     window = webview.create_window(
-        title      = "Kokin's Swiss Downloader",
+        # Shared with utils.notify_done(), which finds this window by title.
+        title      = WINDOW_TITLE,
         url        = html_path,
         js_api     = api,
         width      = 700,

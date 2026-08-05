@@ -7,9 +7,11 @@ Progress updates are pushed into a queue and drained by JS polling poll_updates(
 import os
 import queue
 import re
+import subprocess
 import threading
 import traceback
 from pathlib import Path
+from urllib.parse import urlparse
 import sys
 
 try:
@@ -18,17 +20,141 @@ except ImportError:
     yt_dlp = None
 
 import settings as cfg
+import cookies as site_cookies
+import history
 from providers import (OdesliResolver, QobuzAPI, SpotiflacProxy,
                        MusicBrainz, is_drm_error, friendly_dl_error,
                        extract_qobuz_id, fetch_spotify_metadata,
                        lookup_album_cover, fetch_spotify_album_tracks,
                        is_album_or_playlist_url, clean_url)
 from utils import (find_ffmpeg, tag_flac_file, flac_cover_info,
-                   debug_log, debug_enabled, set_debug, debug_log_path)
+                   debug_log, debug_enabled, set_debug, debug_log_path,
+                   redact_url, notify_done)
 from version import __version__, GITHUB_OWNER, GITHUB_REPO
 
 DEFAULT_OUT       = str(Path.home() / "Music"  / "Swiss Downloads")
 DEFAULT_VIDEO_OUT = str(Path.home() / "Videos" / "Swiss Downloads")
+
+# Resilience options applied to every yt-dlp call.
+#
+# yt-dlp's *command line* defaults these; its Python API does not, so calling
+# YoutubeDL() directly gets no retries at all. That barely shows on a single
+# small file, but a sniffed HLS stream is hundreds of fragments over a flaky
+# CDN — one blip would abandon an otherwise complete download.
+#
+# continuedl is already True by default in the downloader; it's stated here so
+# that resuming a .part file is an explicit, visible promise rather than an
+# inherited default someone could silently change.
+def validate_outtmpl(tmpl: str) -> str:
+    """
+    Check a user-supplied filename template. Returns "" if usable, else why not.
+
+    Three separate hazards, none of which yt-dlp guards for us:
+      - a malformed template ("%(title)") makes YoutubeDL raise at download
+        time, i.e. after the user has walked away
+      - an absolute path or a ".." segment writes outside the chosen output
+        folder, which the user has every reason to assume is respected
+      - an empty template silently produces files called ".mp4"
+    """
+    tmpl = (tmpl or "").strip()
+    if not tmpl:
+        return "Template is empty."
+    if os.path.isabs(tmpl) or (len(tmpl) > 1 and tmpl[1] == ":"):
+        return "Template must be relative to the output folder."
+    parts = tmpl.replace("\\", "/").split("/")
+    if ".." in parts:
+        return "Template can't contain '..'."
+    if tmpl.endswith((".", " ")):
+        return "Template can't end with a dot or space."
+    if yt_dlp is None:
+        return ""
+    # yt-dlp validates against the same template it would really use, so check
+    # the assembled form rather than the fragment the user typed.
+    err = yt_dlp.YoutubeDL({"quiet": True}).validate_outtmpl(tmpl + ".%(ext)s")
+    return str(err) if err else ""
+
+
+def _outtmpl(output_dir, tmpl: str, fallback: str) -> str:
+    """Assemble a full output template, falling back if the saved one is bad."""
+    if validate_outtmpl(tmpl):
+        tmpl = fallback
+    return str(Path(output_dir) / f"{tmpl}.%(ext)s")
+
+
+# Categories offered in Settings. Deliberately a subset of yt-dlp's list: the
+# rest ('music_offtopic', 'poi_highlight', …) are confusing or actively wrong
+# to strip from the music this app mostly downloads.
+_SPONSORBLOCK_CATS = ("sponsor", "selfpromo", "interaction",
+                      "intro", "outro", "preview", "filler")
+
+
+def _sub_langs(s) -> list:
+    """Parse the comma-separated subtitle-language setting."""
+    raw = str(s.get("sub_langs", "en") or "en")
+    langs = [x.strip() for x in raw.replace(";", ",").split(",") if x.strip()]
+    return langs or ["en"]
+
+
+def _tuning_opts(s) -> dict:
+    """Throughput knobs that used to be hardcoded (or absent)."""
+    opts = {}
+    try:
+        frags = int(s.get("concurrent_fragments", 5) or 5)
+    except (TypeError, ValueError):
+        frags = 5
+    # Sniffed HLS streams are hundreds of small fragments and the impersonated
+    # transport roughly halves per-connection throughput, so some parallelism
+    # matters; too much is how you get rate-limited.
+    opts["concurrent_fragment_downloads"] = max(1, min(frags, 16))
+    try:
+        kbps = int(s.get("rate_limit_kbps", 0) or 0)
+    except (TypeError, ValueError):
+        kbps = 0
+    if kbps > 0:
+        opts["ratelimit"] = kbps * 1024
+    return opts
+
+
+def _sponsorblock_pps(s) -> list:
+    """
+    SponsorBlock + chapter postprocessors, in the order yt-dlp expects.
+
+    SponsorBlock only annotates; ModifyChapters is what actually cuts the
+    segments out, so enabling the first without the second would download the
+    sponsor and merely label it. They are always added as a pair.
+    """
+    pps = []
+    if not s.get("sponsorblock"):
+        return pps
+    cats = [c for c in (s.get("sponsorblock_cats") or [])
+            if c in _SPONSORBLOCK_CATS]
+    if not cats:
+        return pps
+    # 'after_filter' matches yt-dlp's own CLI wiring: the API is queried after
+    # match-filtering, so skipped videos don't cost a needless request.
+    pps.append({"key": "SponsorBlock", "categories": cats,
+                "when": "after_filter"})
+    pps.append({"key": "ModifyChapters", "remove_sponsor_segments": cats})
+    return pps
+
+
+def _backoff(attempt):
+    """1, 2, 4, 8, 8… seconds. Retrying a rate-limited CDN instantly is how a
+    transient block becomes a lasting one."""
+    return min(8, 2 ** max(0, attempt - 1))
+
+
+_RETRY_OPTS = {
+    "continuedl":                 True,
+    "retries":                    5,
+    "fragment_retries":           10,
+    # NB: `retry_sleep` (the CLI's "exp=1:8" string form) is parsed by the
+    # option parser and never read by the library — only this key is.
+    "retry_sleep_functions":      {"http": _backoff, "fragment": _backoff},
+    # A handful of dead fragments shouldn't bin a two-hour video; yt-dlp warns
+    # about each one, so the gap is visible in the log rather than silent.
+    "skip_unavailable_fragments": True,
+}
 
 
 # User-Agent presented by the headless browser during a grab. The subsequent
@@ -73,6 +199,114 @@ _PLAY_SELECTORS = ("video", ".vjs-big-play-button", "button[aria-label*=play i]"
                    ".play", ".play-button", "#player", "#root", "body")
 
 
+def _registrable(host):
+    """eTLD+1 ('cdn.vod.example.com' -> 'example.com'). Shared with the cookie
+    jars, which need the same notion of 'same site' but with real consequences
+    if it's wrong."""
+    return site_cookies.site_key(host)
+
+
+def _best_stream(found, page_url):
+    """
+    Pick the most likely real stream from every .m3u8 seen on the network.
+
+    A player page also loads ad manifests, and those frequently ARE master
+    playlists — so preferring 'master' on its own can hand back a 30s preroll
+    that then downloads under the page's title and reports success. Ranking by
+    domain first fixes that: an ad from a third-party network loses to anything
+    served by the site's own operator.
+
+    This ranks rather than filters, because a legitimate stream is normally on
+    a different *host* than the page (site.com -> cdn123.vodhost.net); dropping
+    cross-domain manifests outright would break ordinary downloads. When every
+    candidate scores the same we keep the original sniff order.
+    """
+    page_dom = _registrable(urlparse(page_url).netloc)
+
+    def score(item):
+        url, _ref = item
+        same_dom = _registrable(urlparse(url).netloc) == page_dom
+        return (2 if same_dom else 0) + (1 if "master" in url.lower() else 0)
+
+    return max(found, key=score)  # max() is stable: ties keep first-seen order
+
+
+def _browser_login(page_url, log, timeout=600, should_abort=None):
+    """
+    Open a REAL (visible) browser window so the user can sign in / clear an age
+    gate, then keep the cookies that result.
+
+    This is the counterpart to _browser_grab: the sniffer solves "the stream URL
+    is hidden", this solves "the site won't serve the stream to us at all".
+    Neither the login form nor the CAPTCHA is something we can or should
+    automate — the user does it by hand and we simply collect what falls out.
+
+    We finish when the user closes the window, so there is no guessing about
+    whether a login "worked": whatever cookies exist at that moment are kept.
+    Returns (cookie_count, error_message).
+    """
+    if getattr(sys, "frozen", False):
+        os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:
+        return 0, "Playwright isn't bundled in this build."
+
+    import time as _t
+    aborted = should_abort or (lambda: False)
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=False, args=[
+                "--disable-blink-features=AutomationControlled",
+            ])
+            try:
+                ctx = browser.new_context(
+                    user_agent=_BROWSER_UA,
+                    viewport={"width": 1280, "height": 800},
+                )
+                page = ctx.new_page()
+                try:
+                    page.goto(page_url, wait_until="domcontentloaded",
+                              timeout=45_000)
+                except Exception as e:
+                    # Not fatal: the user can still navigate manually, and a
+                    # slow-loading login page is exactly the normal case here.
+                    log(f"(page load warning: {str(e).splitlines()[0][:90]})", "warn")
+
+                log("Sign in, then CLOSE the browser window to save your session.",
+                    "bright")
+                # Snapshot as we go. Closing the window is the signal that the
+                # user is done, but it also destroys the context — so reading
+                # cookies only at the end would read them only after they are
+                # already gone. Keep the most recent successful read instead.
+                jar = []
+                deadline = _t.time() + timeout
+                while _t.time() < deadline and not aborted():
+                    try:
+                        current = ctx.cookies()
+                    except Exception:
+                        break          # context died => the user closed it
+                    if current:
+                        jar = current
+                    _t.sleep(1.0)
+                    if not browser.is_connected():
+                        break
+            finally:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        return 0, str(e).splitlines()[0][:160]
+
+    if not jar:
+        return 0, ("No cookies were set. If you closed the window before the "
+                   "site finished signing you in, try again.")
+    count, _path = site_cookies.save(page_url, jar)
+    return count, ""
+
+
 def _browser_grab(page_url, log, timeout=60, attempts=3, should_abort=None):
     """
     Load page_url in a real headless browser, let the site's own JS decrypt
@@ -103,8 +337,10 @@ def _browser_grab(page_url, log, timeout=60, attempts=3, should_abort=None):
     import time as _t
     aborted = should_abort or (lambda: False)
 
-    def _attempt(p):
-        found = []  # (url, referer)
+    def _attempt(p, found):
+        # `found` is owned by the caller so that a crash later in this function
+        # (Target crashed, page closed mid-wait — the cases the retry loop
+        # exists for) doesn't discard a manifest that was already sniffed.
         title = None
         browser = p.chromium.launch(headless=True, args=[
             "--autoplay-policy=no-user-gesture-required",
@@ -132,9 +368,9 @@ def _browser_grab(page_url, log, timeout=60, attempts=3, should_abort=None):
                           timeout=min(30, timeout) * 1000)
             except Exception as e:
                 log(f"Browser grab: page load failed ({str(e).splitlines()[0][:90]})", "warn")
-                # Return whatever was already sniffed during navigation — a page
-                # can fire the manifest and still fail to settle.
-                return found, None
+                # Whatever was sniffed during navigation is already in `found`;
+                # a page can fire the manifest and still fail to settle.
+                return None
 
             deadline   = _t.time() + timeout
             stop_click = _t.time() + min(20, timeout)  # then just listen
@@ -159,7 +395,7 @@ def _browser_grab(page_url, log, timeout=60, attempts=3, should_abort=None):
                 browser.close()
             except Exception:
                 pass
-        return found, title
+        return title
 
     for i in range(1, attempts + 1):
         if aborted():
@@ -167,16 +403,14 @@ def _browser_grab(page_url, log, timeout=60, attempts=3, should_abort=None):
         found, title = [], None
         try:
             with sync_playwright() as p:
-                found, title = _attempt(p)
+                title = _attempt(p, found)
         except Exception as e:
             # Crashes (driver spawn, "Target crashed", page closed mid-wait) are
             # exactly what the retries are for, so keep going rather than bail.
             log(f"Browser grab error: {str(e).splitlines()[0][:120]}", "warn")
         if found:
-            for url, ref in found:
-                if "master" in url.lower():
-                    return url, ref, title
-            return found[0][0], found[0][1], title
+            url, ref = _best_stream(found, page_url)
+            return url, ref, title
         if i < attempts and not aborted():
             log(f"Browser grab found nothing (attempt {i}/{attempts}) — retrying...", "warn")
 
@@ -189,12 +423,33 @@ class API:
         self._updates: queue.Queue = queue.Queue()
         self._downloading     = False
         self._abort_flag      = False
+        # Job queue. Downloads run one at a time on a single runner thread:
+        # they are bandwidth-bound, the UI has one progress bar and one row of
+        # provider lights, and the sleep_requests/politeness settings elsewhere
+        # exist to avoid bans — running several at once would undo all three.
+        self._jobs: list[dict] = []
+        self._jobs_lock       = threading.Lock()
+        self._job_seq         = 0
+        self._runner          = None
+        self._job_ok          = False   # set by _emit when a job reports success
+        self._logging_in      = False
+        self._last_file       = ""      # last path yt-dlp reported writing
+        self._skip_history    = False   # set by probe-only jobs (list formats)
         # Synchronous-prompt support: worker thread blocks on _prompt_event until JS replies
         self._prompt_event    = threading.Event()
         self._prompt_response = True
-        set_debug(cfg.load().get("debug_log", False))
-        debug_log(f"--- Swiss Downloader {__version__} started "
-                  f"(log: {debug_log_path()}) ---")
+        # API() is the first thing app.py runs, before any window exists, and
+        # the shipped build is --windowed with no console — so anything that
+        # raises here exits the exe with no window and no traceback. Settings
+        # loading touches disk (app_data_dir() creates it), which can fail on a
+        # redirected or locked-down %LOCALAPPDATA%. Losing the debug-log
+        # preference is survivable; losing the app is not.
+        try:
+            set_debug(cfg.load().get("debug_log", False))
+            debug_log(f"--- Swiss Downloader {__version__} started "
+                      f"(log: {debug_log_path()}) ---")
+        except Exception:
+            pass
 
     def set_window(self, window):
         self._window = window
@@ -222,6 +477,16 @@ class API:
             "qobuzFormat":      s.get("qobuz_format", 6),
             "proxy":            s.get("proxy", ""),
             "debugLog":         s.get("debug_log", False),
+            "notifyDone":       s.get("notify_done", True),
+            "outtmplAudio":     s.get("outtmpl_audio", cfg.DEFAULTS["outtmpl_audio"]),
+            "outtmplVideo":     s.get("outtmpl_video", cfg.DEFAULTS["outtmpl_video"]),
+            "subLangs":         s.get("sub_langs", "en"),
+            "sponsorblock":     s.get("sponsorblock", False),
+            "sponsorblockCats": s.get("sponsorblock_cats", []),
+            "sponsorblockAll":  list(_SPONSORBLOCK_CATS),
+            "embedChapters":    s.get("embed_chapters", False),
+            "concurrentFragments": s.get("concurrent_fragments", 5),
+            "rateLimitKbps":       s.get("rate_limit_kbps", 0),
             "debugLogPath":     str(debug_log_path()),
             "spotiflacFound":   sf.found(),          # always True (built-in fallback)
             "spotiflacLocalDb": sf.has_local_db(),   # true if user has ~/.spotiflac/
@@ -237,10 +502,36 @@ class API:
         for key, dest in [("autoFallback", "auto_fallback"),
                           ("qobuzFormat",  "qobuz_format"),
                           ("proxy",        "proxy"),
-                          ("debugLog",     "debug_log")]:
+                          ("debugLog",     "debug_log"),
+                          ("notifyDone",   "notify_done"),
+                          ("outtmplAudio", "outtmpl_audio"),
+                          ("outtmplVideo", "outtmpl_video"),
+                          ("subLangs",     "sub_langs"),
+                          ("sponsorblock", "sponsorblock"),
+                          ("sponsorblockCats", "sponsorblock_cats"),
+                          ("embedChapters",    "embed_chapters"),
+                          ("concurrentFragments", "concurrent_fragments"),
+                          ("rateLimitKbps",      "rate_limit_kbps")]:
             if key in data:
                 val = data[key]
-                s[dest] = int(val) if dest == "qobuz_format" else val
+                if dest in ("qobuz_format", "concurrent_fragments",
+                            "rate_limit_kbps"):
+                    try:
+                        val = int(val)
+                    except (TypeError, ValueError):
+                        continue      # keep the previous value over a bad one
+                s[dest] = val
+
+        # Reject a broken template here rather than at download time, when the
+        # user has walked away and the only symptom is a failed job.
+        for dest, fallback in (("outtmpl_audio", "%(artist,uploader)s - %(title)s"),
+                               ("outtmpl_video", "%(uploader)s - %(title)s")):
+            err = validate_outtmpl(s.get(dest))
+            if err:
+                s[dest] = cfg.DEFAULTS[dest]
+                cfg.save(s)
+                return {"ok": False,
+                        "msg": f"Filename template rejected ({err}) — reset to default."}
         cfg.save(s)
         # Apply immediately: API is constructed once, so without this the
         # toggle would not take effect until the app was restarted.
@@ -340,51 +631,232 @@ class API:
                        embed_thumb: bool = True,
                        embed_meta:  bool = True,
                        audio_format: str = "flac") -> dict:
-        if self._downloading:
-            return {"ok": False, "msg": "Already downloading."}
         url = url.strip()
         if not url:
             return {"ok": False, "msg": "No URL provided."}
         if yt_dlp is None:
             return {"ok": False, "msg": "yt-dlp not installed."}
 
-        self._downloading = True
-        self._abort_flag  = False
-        threading.Thread(
-            target=self._worker,
-            args=(url, output_dir, int(quality), bool(keep_original),
-                  bool(list_formats), bool(embed_thumb), bool(embed_meta),
-                  str(audio_format).lower()),
-            daemon=True,
-        ).start()
-        return {"ok": True}
+        return self._enqueue("audio", url, (
+            url, output_dir, int(quality), bool(keep_original),
+            bool(list_formats), bool(embed_thumb), bool(embed_meta),
+            str(audio_format).lower()))
 
     def start_video_download(self, url: str, output_dir: str,
                              video_format: str, quality: str,
                              embed_thumb: bool = True,
                              embed_meta:  bool = True,
-                             write_subs:  bool = False) -> dict:
-        if self._downloading:
-            return {"ok": False, "msg": "Already downloading."}
+                             write_subs:  bool = False,
+                             list_formats: bool = False) -> dict:
         url = url.strip()
         if not url:
             return {"ok": False, "msg": "No URL provided."}
         if yt_dlp is None:
             return {"ok": False, "msg": "yt-dlp not installed."}
 
-        self._downloading = True
-        self._abort_flag  = False
-        threading.Thread(
-            target=self._worker_video,
-            args=(url, output_dir, str(video_format).lower(),
-                  str(quality), bool(embed_thumb), bool(embed_meta),
-                  bool(write_subs)),
-            daemon=True,
-        ).start()
-        return {"ok": True}
+        return self._enqueue("video", url, (
+            url, output_dir, str(video_format).lower(),
+            str(quality), bool(embed_thumb), bool(embed_meta),
+            bool(write_subs), bool(list_formats)))
 
     def abort_download(self) -> dict:
+        """Stop everything: the running job and anything still queued.
+
+        'Abort' has always meant "stop", so cancelling only the current item
+        and silently starting the next one would surprise people. Individual
+        pending items can be dropped with remove_job() instead.
+        """
         self._abort_flag = True
+        with self._jobs_lock:
+            for j in self._jobs:
+                if j["status"] == "pending":
+                    j["status"] = "cancelled"
+        self._push_queue()
+        return {"ok": True}
+
+    # ── Search ───────────────────────────────────────────────────────────────
+
+    def search(self, query: str, limit: int = 8) -> dict:
+        """
+        Find something by name instead of making the user go and fetch a URL.
+
+        Results come from YouTube because it is the one source that reliably
+        answers a free-text query WITH a URL attached, and a URL is what the
+        rest of the app runs on. That is not a downgrade in quality: picking a
+        result only fills in the URL box, so the normal provider chain still
+        runs and Odesli/Qobuz can still resolve it to lossless.
+
+        extract_flat keeps this to a single fast metadata call — no formats are
+        resolved and nothing is downloaded.
+        """
+        query = (query or "").strip()
+        if not query:
+            return {"ok": False, "msg": "Type something to search for."}
+        if yt_dlp is None:
+            return {"ok": False, "msg": "yt-dlp not installed."}
+
+        limit = max(1, min(int(limit or 8), 20))
+        opts = {
+            "quiet": True, "no_warnings": True,
+            "skip_download": True, "extract_flat": True,
+        }
+        proxy = cfg.load().get("proxy") or None
+        if proxy:
+            opts["proxy"] = proxy
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
+        except Exception as e:
+            if debug_enabled():
+                debug_log(f"search failed\n{traceback.format_exc()}")
+            return {"ok": False, "msg": friendly_dl_error(str(e)) or f"Search failed: {e}"}
+
+        results = []
+        for e in (info or {}).get("entries") or []:
+            url = e.get("url") or (f"https://www.youtube.com/watch?v={e['id']}"
+                                   if e.get("id") else "")
+            if not url:
+                continue
+            results.append({
+                "title":    e.get("title") or "(untitled)",
+                "url":      url,
+                "uploader": e.get("uploader") or e.get("channel") or "",
+                "duration": int(e["duration"]) if e.get("duration") else 0,
+            })
+        if not results:
+            return {"ok": False, "msg": f"Nothing found for “{query}”."}
+        return {"ok": True, "results": results}
+
+    # ── History ──────────────────────────────────────────────────────────────
+
+    def get_history(self) -> list:
+        return self._history_entries()
+
+    @staticmethod
+    def _history_entries(limit: int = 100) -> list:
+        """History plus a liveness flag. Both the poll and the push go through
+        here so a freshly-finished row renders the same as a reloaded one."""
+        entries = history.listing(limit)
+        # Tell the UI whether each file is still where we left it, so a moved
+        # or deleted download doesn't offer a dead "open folder" button.
+        for e in entries:
+            e["exists"] = bool(e.get("path")) and Path(e["path"]).exists()
+        return entries
+
+    def clear_history(self) -> dict:
+        return {"ok": True, "removed": history.clear()}
+
+    def reveal_file(self, path: str) -> dict:
+        """Open the folder containing a downloaded file and select it."""
+        p = Path(path or "")
+        if not p.exists():
+            # Fall back to the folder: post-processing renames the file (e.g.
+            # .webm -> .flac), so the recorded path can be stale while the
+            # download itself was fine.
+            if p.parent.exists():
+                p = p.parent
+            else:
+                return {"ok": False, "msg": "That file is no longer there."}
+        try:
+            if sys.platform == "win32":
+                if p.is_dir():
+                    os.startfile(str(p))            # noqa: S606
+                else:
+                    subprocess.Popen(["explorer", "/select,", str(p)])
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", "-R", str(p)])
+            else:
+                subprocess.Popen(["xdg-open", str(p if p.is_dir() else p.parent)])
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "msg": str(e)}
+
+    # ── Site sign-in (cookies) ───────────────────────────────────────────────
+
+    def browser_login(self, url: str) -> dict:
+        """Open a visible browser so the user can sign in to `url`'s site."""
+        url = (url or "").strip()
+        if not url:
+            return {"ok": False, "msg": "Enter a URL from the site first."}
+        # site_key() echoes back anything dot-less, so "notaurl" would sail
+        # through a plain truthiness check and open a browser on nothing.
+        if "." not in site_cookies.site_key(url):
+            return {"ok": False, "msg": "That doesn't look like a site URL."}
+        if self._logging_in:
+            return {"ok": False, "msg": "A sign-in window is already open."}
+
+        self._logging_in = True
+        threading.Thread(target=self._login_worker, args=(url,),
+                         daemon=True).start()
+        return {"ok": True}
+
+    def list_cookies(self) -> list:
+        return site_cookies.listing()
+
+    def forget_cookies(self, site: str) -> dict:
+        ok = site_cookies.forget(site)
+        return {"ok": ok, "sites": site_cookies.listing()}
+
+    def forget_all_cookies(self) -> dict:
+        n = site_cookies.forget_all()
+        return {"ok": True, "removed": n, "sites": site_cookies.listing()}
+
+    def _login_worker(self, url):
+        try:
+            self._emit("login_state", busy=True)
+            self._log(f"Opening a browser to sign in to {site_cookies.site_key(url)}…",
+                      "info")
+            count, err = _browser_login(url, self._log,
+                                        should_abort=lambda: self._abort_flag)
+            if err and not count:
+                self._log(f"Sign-in failed: {err}", "err")
+            else:
+                self._log(f"Saved {count} cookies for "
+                          f"{site_cookies.site_key(url)}. Downloads from this "
+                          f"site will use them.", "bright")
+        except Exception as e:
+            self._log(f"Sign-in failed: {e}", "err")
+        finally:
+            self._logging_in = False
+            self._emit("login_state", busy=False, sites=site_cookies.listing())
+
+    # ── Queue ────────────────────────────────────────────────────────────────
+
+    def get_queue(self) -> list:
+        return self._queue_snapshot()
+
+    def remove_job(self, job_id: int) -> dict:
+        """Drop a queued item. The running one has to go through abort."""
+        with self._jobs_lock:
+            for j in self._jobs:
+                if j["id"] == int(job_id):
+                    if j["status"] == "running":
+                        return {"ok": False, "msg": "That one is running — use Abort."}
+                    self._jobs.remove(j)
+                    break
+        self._push_queue()
+        return {"ok": True}
+
+    def retry_job(self, job_id: int) -> dict:
+        """Re-queue a finished item using the settings it was created with."""
+        with self._jobs_lock:
+            for j in self._jobs:
+                if j["id"] == int(job_id):
+                    if j["status"] in ("running", "pending"):
+                        return {"ok": False, "msg": "That one hasn't finished yet."}
+                    j["status"] = "pending"
+                    break
+            else:
+                return {"ok": False, "msg": "No such item."}
+        self._push_queue()
+        self._ensure_runner()
+        return {"ok": True}
+
+    def clear_finished(self) -> dict:
+        with self._jobs_lock:
+            self._jobs = [j for j in self._jobs
+                          if j["status"] in ("pending", "running")]
+        self._push_queue()
         return {"ok": True}
 
     def prompt_response(self, answer: bool) -> dict:
@@ -417,7 +889,107 @@ class API:
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _emit(self, kind: str, **kwargs):
+        # The workers report a finished download by emitting "success" rather
+        # than returning a status (they catch and log their own errors), so
+        # this is where the queue learns whether a job actually worked.
+        if kind == "success":
+            self._job_ok = True
         self._updates.put({"kind": kind, **kwargs})
+
+    # ── Queue internals ──────────────────────────────────────────────────────
+
+    def _enqueue(self, kind: str, url: str, args: tuple) -> dict:
+        with self._jobs_lock:
+            self._job_seq += 1
+            job = {"id": self._job_seq, "kind": kind, "url": url,
+                   "status": "pending", "args": args}
+            self._jobs.append(job)
+            # Count the running job too — by the time a second URL is added the
+            # first has usually left 'pending', and ignoring it would report the
+            # newcomer as starting immediately when it is in fact waiting.
+            ahead = sum(1 for j in self._jobs
+                        if j["status"] in ("pending", "running")) - 1
+        self._push_queue()
+        self._ensure_runner()
+        if ahead > 0:
+            self._log(f"Queued behind {ahead} other download"
+                      f"{'s' if ahead > 1 else ''}: {url}", "info")
+        return {"ok": True, "id": job["id"], "queued": ahead > 0}
+
+    def _queue_snapshot(self) -> list:
+        """Job list for the UI — without `args`, which holds no display value
+        and would be pushed on every poll."""
+        with self._jobs_lock:
+            return [{k: v for k, v in j.items() if k != "args"} for j in self._jobs]
+
+    def _push_queue(self):
+        self._emit("queue", jobs=self._queue_snapshot())
+
+    def _ensure_runner(self):
+        """Start the drain thread if it isn't already going."""
+        with self._jobs_lock:
+            if self._runner is not None and self._runner.is_alive():
+                return
+            self._runner = threading.Thread(target=self._runner_loop, daemon=True)
+            runner = self._runner
+        runner.start()
+
+    def _runner_loop(self):
+        """Run queued jobs one at a time until nothing is pending."""
+        ran = 0
+        all_ok = True
+        try:
+            while True:
+                with self._jobs_lock:
+                    job = next((j for j in self._jobs
+                                if j["status"] == "pending"), None)
+                    if job is None:
+                        return
+                    job["status"] = "running"
+                # A fresh job must not inherit the previous one's abort, but a
+                # user who hit Abort cancelled the whole queue — so anything
+                # still pending was already marked cancelled above.
+                self._abort_flag  = False
+                self._downloading = True
+                self._job_ok       = False
+                self._last_file    = ""
+                self._skip_history = False
+                self._push_queue()
+                fn = self._worker if job["kind"] == "audio" else self._worker_video
+                try:
+                    fn(*job["args"])
+                except Exception:
+                    # Workers handle their own errors; anything reaching here is
+                    # a bug in the worker itself and must not kill the queue.
+                    if debug_enabled():
+                        debug_log(f"job {job['id']} crashed\n{traceback.format_exc()}")
+                    self._log("That download failed unexpectedly.", "err")
+                status = ("cancelled" if self._abort_flag
+                          else "done" if self._job_ok else "failed")
+                ran += 1
+                all_ok = all_ok and status == "done"
+                with self._jobs_lock:
+                    job["status"] = status
+                try:
+                    if not self._skip_history:
+                        history.add(job["kind"], job["url"], status,
+                                    title=Path(self._last_file).stem if self._last_file else "",
+                                    path=self._last_file)
+                except Exception:
+                    pass   # history is a convenience; never fail a job over it
+                self._push_queue()
+                self._emit("history", entries=self._history_entries(50))
+        finally:
+            self._downloading = False
+            self._emit("done")
+            # Only when work actually happened: a runner that starts and finds
+            # nothing pending (a race with remove_job, say) shouldn't chime.
+            if ran:
+                try:
+                    if cfg.load().get("notify_done", True):
+                        notify_done(ok=all_ok)
+                except Exception:
+                    pass
 
     def _log(self, msg: str, level: str = "ok"):
         self._emit("log", msg=str(msg), level=level)
@@ -467,9 +1039,12 @@ class API:
             # Single track / native-playlist URL
             self._download_one(url, output_dir, quality, keep, list_fmt,
                                embed_thumb, embed_meta, audio_format)
-        finally:
-            self._downloading = False
-            self._emit("done")
+        except Exception:
+            # _download_one logs its own failures; a leak to here is a bug, and
+            # the runner needs it to mark the job failed rather than swallow it.
+            if debug_enabled():
+                debug_log(f"audio worker crashed\n{traceback.format_exc()}")
+            raise
 
     def _download_one(self, url, output_dir, quality, keep, list_fmt,
                       embed_thumb=True, embed_meta=True, audio_format="flac"):
@@ -493,6 +1068,10 @@ class API:
                 pct   = (done / total * 100) if total else 0
                 self._progress(pct, speed=speed, eta=eta, done=done, total=total)
             elif d["status"] == "finished":
+                # Remember what was really written — history records the actual
+                # file, which is the only way a skipped-but-reported-successful
+                # download becomes visible.
+                self._last_file = d.get("filename") or ""
                 self._log(f"Downloaded: {Path(d['filename']).name}", "bright")
                 self._log("Converting to FLAC…", "dim")
                 self._progress(100)
@@ -539,10 +1118,13 @@ class API:
         def make_opts(target_url):
             # %(artist,uploader)s = use the 'artist' field if present (Bandcamp, etc.),
             # otherwise fall back to 'uploader' (YouTube channel name).
-            tpl = str(Path(output_dir) / "%(artist,uploader)s - %(title)s.%(ext)s")
+            tpl = _outtmpl(output_dir, s.get("outtmpl_audio"),
+                           "%(artist,uploader)s - %(title)s")
             pps = [_audio_postproc()]
             if embed_meta:
-                pps.append({"key": "FFmpegMetadata", "add_metadata": True})
+                pps.append({"key": "FFmpegMetadata", "add_metadata": True,
+                            "add_chapters": bool(s.get("embed_chapters"))})
+            pps.extend(_sponsorblock_pps(s))
             if embed_thumb and audio_format != "wav":
                 # WAV doesn't support embedded album art
                 pps.append({"key": "EmbedThumbnail"})
@@ -553,9 +1135,17 @@ class API:
                 "writethumbnail":  embed_thumb and audio_format != "wav",
                 "keepvideo":       keep,
                 "progress_hooks":  [ydl_hook],
+                **_RETRY_OPTS,
+                **_tuning_opts(s),
             }
             if ffmpeg_dir: opts["ffmpeg_location"] = str(ffmpeg_dir)
             if proxy:      opts["proxy"] = proxy
+            # Keyed on the target rather than the URL the user pasted: Odesli
+            # hands us the same track on a different service, and the cookies
+            # that matter are the ones for wherever we actually fetch from.
+            # (No log line here — make_opts runs once per provider attempt.)
+            jar = site_cookies.cookie_file_for(target_url)
+            if jar:        opts["cookiefile"] = jar
             imp = _impersonate_target()
             if imp:        opts["impersonate"] = imp
             return opts
@@ -666,6 +1256,9 @@ class API:
                             f"  {f.get('format_id','?'):12s}  "
                             f"{f.get('ext','?'):6s}  {f.get('format_note','')}", "dim")
                 self._log("Format listing complete.", "ok")
+                # As above: a successful probe, but nothing was downloaded.
+                self._skip_history = True
+                self._emit("success")
                 return
 
             # 1. yt-dlp
@@ -964,7 +1557,7 @@ class API:
         except Exception as exc:
             msg = str(exc)
             if debug_enabled():
-                debug_log(f"audio error for {url}\n{traceback.format_exc()}")
+                debug_log(f"audio error for {redact_url(url)}\n{traceback.format_exc()}")
             self._log(friendly_dl_error(msg) or f"ERROR: {msg}", "err")
         # NOTE: _downloading flag + 'done' event are reset by the outer _worker
         # so album loops can keep going across multiple track downloads.
@@ -975,7 +1568,8 @@ class API:
         self._log("Trying browser grab (loading the page in a real browser)...", "warn")
         m3u8, ref, title = _browser_grab(page_url, self._log,
                                          should_abort=lambda: self._abort_flag)
-        debug_log(f"browser grab {page_url} -> m3u8={m3u8} ref={ref} title={title!r}")
+        debug_log(f"browser grab {redact_url(page_url)} -> m3u8={redact_url(m3u8)} "
+                  f"ref={redact_url(ref)} found={bool(m3u8)}")
         if self._abort_flag:
             self._log("Aborted.", "warn")
             return True   # nothing failed; the user stopped it
@@ -983,7 +1577,6 @@ class API:
             self._log("Browser grab found no downloadable stream "
                       "(the player may use real DRM).", "err")
             return False
-        from urllib.parse import urlparse
         origin = f"{urlparse(ref).scheme}://{urlparse(ref).netloc}"
         opts2 = dict(opts)
         # Merge, don't replace: the original headers (and the impersonation
@@ -1001,17 +1594,30 @@ class API:
         slug = urlparse(page_url).path.rstrip("/").rsplit("/", 1)[-1] or "video"
         safe = yt_dlp.utils.sanitize_filename(title or slug, restricted=False)
         # Plenty of player pages share one constant <title> ("Watch", the site
-        # name). Without this, the second video would collide with the first and
-        # yt-dlp would skip it while still reporting success.
-        if title and Path(output_dir).exists():
+        # name), and the slug fallback collides just as easily (every series has
+        # an "episode-7"). Without this, the second video would collide with the
+        # first and yt-dlp would skip it while still reporting success.
+        #
+        # Compare against real filenames rather than a glob pattern: titles keep
+        # their brackets through sanitize_filename, and glob would read the
+        # "[1080p]" in "Watch [1080p] Ep 7" as a character class and match
+        # nothing — silently disabling this guard on exactly the sites that need
+        # it most.
+        if Path(output_dir).exists():
+            try:
+                taken = {p.stem for p in Path(output_dir).iterdir() if p.is_file()}
+            except OSError:
+                taken = set()
             stem, n = safe, 2
-            while any(p.stem == safe for p in Path(output_dir).glob(f"{stem}*")):
+            while safe in taken:
                 safe = f"{stem} ({n})"
                 n += 1
         opts2["outtmpl"] = str(Path(output_dir) / f"{safe}.%(ext)s")
         # Sniffed streams are HLS with hundreds of small fragments, and the
         # impersonated transport roughly halves per-connection throughput.
         # Fetching a few at a time turns a multi-hour download into minutes.
+        # The value is inherited from opts (Settings); this only covers callers
+        # that built opts without it.
         opts2.setdefault("concurrent_fragment_downloads", 5)
         # Inherited from the page-level opts but meaningless for a bare
         # manifest: there is no thumbnail or subtitle track to fetch.
@@ -1032,12 +1638,13 @@ class API:
         except Exception as e:
             self._provider("ytdlp", "fail")
             if debug_enabled():
-                debug_log(f"browser-grab download failed for {m3u8}\n{traceback.format_exc()}")
+                debug_log(f"browser-grab download failed for {redact_url(m3u8)}\n"
+                          f"{traceback.format_exc()}")
             self._log(friendly_dl_error(str(e)) or f"ERROR: {e}", "err")
             return False
 
     def _worker_video(self, url, output_dir, video_format, quality,
-                      embed_thumb, embed_meta, write_subs):
+                      embed_thumb, embed_meta, write_subs, list_formats=False):
         s          = cfg.load()
         proxy      = s.get("proxy") or None
         ffmpeg_dir = find_ffmpeg()
@@ -1050,6 +1657,10 @@ class API:
                 done  = d.get("downloaded_bytes", 0)
                 self._progress((done / total * 100) if total else 0)
             elif d["status"] == "finished":
+                # Remember what was really written — history records the actual
+                # file, which is the only way a skipped-but-reported-successful
+                # download becomes visible.
+                self._last_file = d.get("filename") or ""
                 self._log(f"Downloaded: {Path(d['filename']).name}", "bright")
                 self._progress(100)
 
@@ -1083,23 +1694,33 @@ class API:
             merge = None
 
         pps = []
-        if embed_meta:  pps.append({"key": "FFmpegMetadata", "add_metadata": True})
+        if embed_meta:  pps.append({"key": "FFmpegMetadata", "add_metadata": True,
+                                    "add_chapters": bool(s.get("embed_chapters"))})
         if embed_thumb: pps.append({"key": "EmbedThumbnail"})
+        pps.extend(_sponsorblock_pps(s))
 
-        tpl  = str(Path(output_dir) / "%(uploader)s - %(title)s.%(ext)s")
+        tpl  = _outtmpl(output_dir, s.get("outtmpl_video"),
+                        "%(uploader)s - %(title)s")
         opts = {
             "format":         fmt,
             "outtmpl":        tpl,
             "postprocessors": pps,
             "writethumbnail": embed_thumb,
             "writesubtitles": write_subs,
-            "subtitleslangs": ["en", "en-US"] if write_subs else [],
+            "subtitleslangs": _sub_langs(s) if write_subs else [],
             "progress_hooks": [ydl_hook],
             "logger":         Logger(self._log),
+            **_RETRY_OPTS,
+            **_tuning_opts(s),
         }
         if merge:      opts["merge_output_format"] = merge
         if ffmpeg_dir: opts["ffmpeg_location"]     = str(ffmpeg_dir)
         if proxy:      opts["proxy"]               = proxy
+        jar = site_cookies.cookie_file_for(url)
+        if jar:
+            opts["cookiefile"] = jar
+            self._log(f"Using your saved sign-in for "
+                      f"{site_cookies.site_key(url)}.", "info")
         imp = _impersonate_target()
         if imp:        opts["impersonate"]         = imp
         elif _impersonate_note:
@@ -1107,6 +1728,33 @@ class API:
 
         try:
             Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+            if list_formats:
+                self._log("Fetching available formats…", "dim")
+                self._provider("ytdlp", "active")
+                probe = {"listformats": True, "quiet": True,
+                         **({"proxy": proxy} if proxy else {})}
+                if jar:
+                    probe["cookiefile"] = jar   # gated videos need it to probe
+                with yt_dlp.YoutubeDL(probe) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                for f in (info or {}).get("formats", []):
+                    size = f.get("filesize") or f.get("filesize_approx") or 0
+                    self._log(
+                        f"  {str(f.get('format_id','?')):>6s}  "
+                        f"{str(f.get('ext','?')):5s}  "
+                        f"{str(f.get('resolution') or f.get('format_note') or ''):12s}  "
+                        f"{(str(round(size/1048576)) + ' MB') if size else ''}", "dim")
+                self._provider("ytdlp", "ok")
+                self._log("Format listing complete — nothing downloaded.", "ok")
+                # Counts as a successful job so the queue doesn't mark it
+                # failed, but it is NOT a download and must not appear in the
+                # history — a history full of things that fetched nothing is
+                # exactly the noise history exists to avoid.
+                self._skip_history = True
+                self._emit("success")
+                return
+
             self._provider("ytdlp", "active")
             q_label = "best" if quality == "best" else f"up to {quality}p"
             self._log(f"Downloading video ({video_format.upper()}, {q_label}): {url}", "ok")
@@ -1119,7 +1767,7 @@ class API:
             self._provider("ytdlp", "fail")
             err = str(e)
             if debug_enabled():
-                debug_log(f"video DownloadError for {url}\n{traceback.format_exc()}")
+                debug_log(f"video DownloadError for {redact_url(url)}\n{traceback.format_exc()}")
             if "Aborted" in err:
                 self._log("Aborted.", "warn")
             elif is_drm_error(err):
@@ -1141,8 +1789,5 @@ class API:
             self._provider("ytdlp", "fail")
             msg = str(exc)
             if debug_enabled():
-                debug_log(f"video error for {url}\n{traceback.format_exc()}")
+                debug_log(f"video error for {redact_url(url)}\n{traceback.format_exc()}")
             self._log(friendly_dl_error(msg) or f"ERROR: {msg}", "err")
-        finally:
-            self._downloading = False
-            self._emit("done")

@@ -1,6 +1,7 @@
 """Shared utilities — ffmpeg detection, app data directory, FLAC tagging."""
 
 import os
+import re
 import sys
 import shutil
 from datetime import datetime
@@ -94,6 +95,46 @@ def debug_log_path() -> Path:
     return app_data_dir() / "logs" / "swiss-downloader.log"
 
 
+def redact_url(u) -> str:
+    """
+    Reduce a URL to scheme://host for logging.
+
+    The Settings panel shows users the log path so they can attach the file to
+    a bug report, which makes anything written here effectively published. Full
+    URLs would turn it into a browsing history (this app downloads from adult
+    sites among others), and sniffed CDN manifests carry signed query tokens
+    that may still be live. The host alone is what actually drives triage —
+    extractors and bot-checks are per-site — so that is all we keep.
+    """
+    if not u:
+        return str(u)
+    try:
+        from urllib.parse import urlparse
+        parts = urlparse(str(u))
+        if not parts.netloc:
+            return "<non-url>"
+        tail = "/..." if (parts.path.strip("/") or parts.query) else ""
+        return f"{parts.scheme}://{parts.netloc}{tail}"
+    except Exception:
+        return "<unparseable-url>"
+
+
+_QUERY_RE = re.compile(r"(https?://[^\s'\"]*?)\?[^\s'\"]*")
+
+
+def _strip_tokens(msg: str) -> str:
+    """
+    Drop the query string from any URL in a log line.
+
+    Call sites pass URLs through redact_url(), but tracebacks embed them too —
+    yt-dlp puts the failing URL in its exception text — so scrubbing centrally
+    is the only way to be sure a signed manifest token never lands in a file
+    the user is invited to email. Paths survive here; only the credential-
+    bearing part is removed.
+    """
+    return _QUERY_RE.sub(r"\1?<redacted>", msg)
+
+
 def debug_log(msg: str) -> None:
     """
     Append a timestamped line to the debug log, if enabled.
@@ -105,6 +146,7 @@ def debug_log(msg: str) -> None:
     if not _debug_enabled:
         return
     try:
+        msg = _strip_tokens(msg)
         p = debug_log_path()
         p.parent.mkdir(parents=True, exist_ok=True)
         # Single-step rotation: a failing album can write hundreds of
@@ -114,6 +156,58 @@ def debug_log(msg: str) -> None:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with p.open("a", encoding="utf-8") as fh:
             fh.write(f"[{ts}] {msg}\n")
+    except Exception:
+        pass
+
+
+WINDOW_TITLE = "Kokin's Swiss Downloader"
+
+
+def notify_done(ok: bool = True, window_title: str = WINDOW_TITLE) -> None:
+    """
+    Get the user's attention when a batch of downloads finishes.
+
+    Downloads run for minutes behind a small frameless window that people
+    minimise and forget, so finishing silently means they find out much later.
+
+    Deliberately no toast library: this ships as a one-file PyInstaller build
+    where every extra dependency is another thing that can fail to bundle, and
+    a taskbar flash plus the system sound needs nothing beyond the stdlib. The
+    flash stops as soon as the window is focused, so it can't nag.
+
+    The window is located BY TITLE rather than via GetForegroundWindow(), which
+    returns whatever the user happens to be looking at — flashing another
+    application's window would be worse than not notifying at all.
+
+    Never raises — a failed notification must not affect a download.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class FLASHWINFO(ctypes.Structure):
+            _fields_ = [("cbSize",    wintypes.UINT),
+                        ("hwnd",      wintypes.HWND),
+                        ("dwFlags",   wintypes.DWORD),
+                        ("uCount",    wintypes.UINT),
+                        ("dwTimeout", wintypes.DWORD)]
+
+        user32 = ctypes.windll.user32
+        user32.FindWindowW.restype = wintypes.HWND
+        hwnd = user32.FindWindowW(None, window_title)
+        if hwnd:
+            FLASHW_ALL, FLASHW_TIMERNOFG = 0x3, 0xC
+            info = FLASHWINFO(ctypes.sizeof(FLASHWINFO), hwnd,
+                              FLASHW_ALL | FLASHW_TIMERNOFG, 5, 0)
+            user32.FlashWindowEx(ctypes.byref(info))
+    except Exception:
+        pass
+    try:
+        import winsound
+        winsound.MessageBeep(winsound.MB_ICONASTERISK if ok
+                             else winsound.MB_ICONHAND)
     except Exception:
         pass
 

@@ -449,6 +449,69 @@ hr.separator {
   user-select: text;
   min-height: 0;
 }
+/* ── Download queue ─────────────────────────────────────────────────────── */
+.queue-wrap {
+  background: var(--win-light);
+  max-height: 96px;
+  overflow-y: auto;
+  margin-top: 4px;
+  padding: 2px;
+  box-shadow:
+    inset  1px  1px 0 var(--win-darker),
+    inset -1px -1px 0 var(--win-light),
+    inset  2px  2px 0 var(--win-dark),
+    inset -2px -2px 0 var(--win-lighter);
+}
+.queue-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 3px;
+  font-size: var(--font-sz);
+  white-space: nowrap;
+}
+.queue-row + .queue-row { border-top: 1px dotted var(--win-lighter); }
+.queue-row.running { background: var(--win-blue); color: var(--win-light); }
+.queue-badge  { flex: 0 0 auto; width: 13px; text-align: center; }
+.queue-kind   { flex: 0 0 auto; width: 34px; color: var(--win-dark); }
+.queue-row.running .queue-kind { color: var(--win-lighter); }
+.queue-url    { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.queue-x {
+  flex: 0 0 auto; cursor: pointer; padding: 0 3px;
+  color: var(--win-dark); font-weight: bold;
+}
+.queue-x:hover { color: #cc0000; }
+.queue-empty  { color: var(--win-dark); padding: 2px 3px; font-size: var(--font-sz); }
+.queue-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-top: 6px; font-size: var(--font-sz);
+}
+.qh-tab {
+  cursor: pointer; padding: 0 6px 1px; color: var(--win-dark);
+  border-bottom: 2px solid transparent;
+}
+.qh-tab.active { color: var(--win-text); font-weight: bold;
+                 border-bottom-color: var(--win-blue); }
+.search-results {
+  background: var(--win-light); max-height: 132px; overflow-y: auto;
+  margin-top: 4px; padding: 2px;
+  box-shadow:
+    inset  1px  1px 0 var(--win-darker), inset -1px -1px 0 var(--win-light),
+    inset  2px  2px 0 var(--win-dark),   inset -2px -2px 0 var(--win-lighter);
+}
+.search-row {
+  display: flex; align-items: center; gap: 6px;
+  padding: 2px 3px; cursor: pointer; font-size: var(--font-sz);
+}
+.search-row:hover { background: var(--win-blue); color: var(--win-light); }
+.search-title { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis;
+                white-space: nowrap; }
+.search-meta  { flex: 0 0 auto; color: var(--win-dark); }
+.search-row:hover .search-meta { color: var(--win-lighter); }
+.hist-when { flex: 0 0 auto; color: var(--win-dark); width: 76px; }
+.hist-ok   { color: #006600; }
+.hist-bad  { color: #aa0000; }
+
 .log-line { white-space: pre-wrap; word-break: break-all; }
 .log-ok     { color: #ffffff; }
 .log-bright { color: #ffffff; font-weight: bold; }
@@ -748,6 +811,14 @@ hr.separator {
       <div class="form-group">
         <label>URL <span class="label-sm">(Spotify · YouTube · SoundCloud · Bandcamp · …)</span></label>
         <input type="url" class="form-control" id="urlInput" placeholder="Paste a music URL here…" autocomplete="off" spellcheck="false">
+        <div class="flex-row mt4">
+          <input type="text" class="form-control" id="searchAudio" style="flex:1"
+                 placeholder="…or search by name, e.g. radiohead creep"
+                 autocomplete="off" spellcheck="false"
+                 onkeydown="if(event.key==='Enter'){event.preventDefault();runSearch('audio')}">
+          <button class="btn" onclick="runSearch('audio')" style="min-width:70px">Search</button>
+        </div>
+        <div class="search-results" id="searchResultsAudio" style="display:none"></div>
       </div>
 
       <div class="form-group">
@@ -810,6 +881,14 @@ hr.separator {
       <div class="form-group">
         <label>URL <span class="label-sm">(YouTube · Vimeo · Twitch · Twitter · …)</span></label>
         <input type="url" class="form-control" id="urlInputVideo" placeholder="Paste a video URL here…" autocomplete="off" spellcheck="false">
+        <div class="flex-row mt4">
+          <input type="text" class="form-control" id="searchVideo" style="flex:1"
+                 placeholder="…or search by name"
+                 autocomplete="off" spellcheck="false"
+                 onkeydown="if(event.key==='Enter'){event.preventDefault();runSearch('video')}">
+          <button class="btn" onclick="runSearch('video')" style="min-width:70px">Search</button>
+        </div>
+        <div class="search-results" id="searchResultsVideo" style="display:none"></div>
       </div>
 
       <div class="form-group">
@@ -855,6 +934,9 @@ hr.separator {
       <div class="flex-row mt4" style="gap:20px">
         <label class="form-check">
           <input type="checkbox" id="writeSubs"> Download subtitles (if available)
+        </label>
+        <label class="form-check">
+          <input type="checkbox" id="listFormatsVideo"> List formats only (no download)
         </label>
       </div>
 
@@ -914,10 +996,91 @@ hr.separator {
         <div class="section-title">Troubleshooting</div>
 
         <div class="form-group mt4">
+          <div class="section-title">Filenames</div>
+          <div class="mt4">
+            <label>Audio filename</label>
+            <input type="text" class="form-control" id="sOuttmplAudio"
+                   autocomplete="off" spellcheck="false">
+            <label class="mt4">Video filename</label>
+            <input type="text" class="form-control" id="sOuttmplVideo"
+                   autocomplete="off" spellcheck="false">
+            <div class="label-sm mt4">
+              yt-dlp template syntax. Common fields:
+              <code>%(title)s</code>, <code>%(artist)s</code>,
+              <code>%(uploader)s</code>, <code>%(album)s</code>,
+              <code>%(track_number)02d</code>, <code>%(upload_date)s</code>.
+              Use <code>/</code> to make subfolders. The file extension is added
+              automatically.
+            </div>
+          </div>
+
+          <hr class="separator">
+          <div class="section-title">Downloads</div>
+          <div class="mt4">
+            <label>Subtitle languages</label>
+            <input type="text" class="form-control" id="sSubLangs"
+                   placeholder="en, es  —  or  all" autocomplete="off" spellcheck="false">
+            <div class="label-sm">Only used when “Download subtitles” is ticked
+              on the Video tab.</div>
+
+            <div class="flex-row mt4">
+              <div style="flex:1">
+                <label>Parallel fragments</label>
+                <input type="number" class="form-control" id="sConcurrentFragments"
+                       min="1" max="16" step="1">
+              </div>
+              <div style="flex:1">
+                <label>Speed limit (KB/s, 0 = off)</label>
+                <input type="number" class="form-control" id="sRateLimit"
+                       min="0" step="64">
+              </div>
+            </div>
+            <div class="label-sm mt4">Streams arrive as hundreds of small
+              fragments; fetching a few at once is much faster, but too many can
+              get you rate-limited.</div>
+          </div>
+
+          <hr class="separator">
+          <div class="section-title">SponsorBlock</div>
+          <div class="mt4">
+            <label><input type="checkbox" id="sSponsorblock" onchange="toggleSponsorCats()"> Skip sponsor segments (YouTube)</label>
+            <div class="label-sm">Uses the community SponsorBlock database to cut
+              the selected segments out of the file. Sends the video ID to
+              sponsor.ajay.app when enabled.</div>
+            <div id="sbCats" class="mt4" style="display:none"></div>
+            <label class="mt4"><input type="checkbox" id="sEmbedChapters"> Embed chapter markers</label>
+          </div>
+
+          <hr class="separator">
+          <label><input type="checkbox" id="sNotifyDone" checked> Chime when downloads finish</label>
+          <div class="label-sm">Plays the system sound and flashes the taskbar
+            once the whole queue is done, so you can leave it running.</div>
+          <hr class="separator">
           <label><input type="checkbox" id="sDebugLog"> Write a debug log</label>
           <div class="label-sm">Saves error details to a file so a failing download can be
             diagnosed. Off by default; leave it off unless you're chasing a problem.</div>
           <div class="label-sm mt4" id="sDebugLogPath" style="word-break:break-all"></div>
+        </div>
+
+        <hr class="separator">
+        <div class="section-title">Site sign-in</div>
+        <div class="mt4">
+          <div class="label-sm">Some sites only serve video to a signed-in or
+            age-confirmed visitor. Paste any URL from the site and a real browser
+            window opens — sign in there, then close it, and this app will reuse
+            that session.</div>
+          <div class="flex-row mt4">
+            <input type="text" id="loginUrl" placeholder="https://site.com/…" style="flex:1">
+            <button class="btn" id="btnLogin" onclick="startLogin()" style="min-width:90px">Sign in…</button>
+          </div>
+          <div class="label-sm mt4" style="color:#aa0000">
+            Saved sessions are stored unencrypted on this PC and are as
+            sensitive as your password. Forget them when you're done.
+          </div>
+          <div id="cookieList" class="mt4"></div>
+          <div class="flex-row mt4">
+            <button class="btn" onclick="forgetAllCookies()">Forget all sessions</button>
+          </div>
         </div>
 
         <hr class="separator">
@@ -968,6 +1131,22 @@ hr.separator {
         <div class="provider-item"><div class="provider-dot idle" id="dot-odesli"></div><span>Odesli</span></div>
         <div class="provider-item"><div class="provider-dot idle" id="dot-proxy"></div><span>Proxy</span></div>
         <div class="provider-item"><div class="provider-dot idle" id="dot-musicbrainz"></div><span>MusicBrainz</span></div>
+      </div>
+
+      <!-- Queue / History -->
+      <div class="queue-head">
+        <span>
+          <span class="qh-tab active" id="qhTabQueue" onclick="showQueuePanel('queue')">Queue: <span id="queueCount">empty</span></span>
+          <span class="qh-tab" id="qhTabHist" onclick="showQueuePanel('history')">History</span>
+        </span>
+        <span class="queue-x" id="queuePanelAction" onclick="queuePanelAction()"
+              title="Remove finished items">clear finished</span>
+      </div>
+      <div class="queue-wrap" id="queueWrap">
+        <div class="queue-empty">Nothing queued.</div>
+      </div>
+      <div class="queue-wrap" id="historyWrap" style="display:none">
+        <div class="queue-empty">No downloads yet.</div>
       </div>
 
       <!-- Log -->
@@ -1168,23 +1347,246 @@ async function startVideoDownload() {
   const thumb  = document.getElementById('embedThumbVideo').checked;
   const meta   = document.getElementById('embedMetaVideo').checked;
   const subs   = document.getElementById('writeSubs').checked;
+  const listFm = document.getElementById('listFormatsVideo').checked;
 
   if (!url) { appendLog('No URL provided.', 'err'); return; }
 
-  const result = await api('start_video_download', url, outDir, vfmt, vqual, thumb, meta, subs);
+  const result = await api('start_video_download', url, outDir, vfmt, vqual, thumb, meta, subs, listFm);
   if (!result.ok) { appendLog(result.msg, 'err'); return; }
 
   beforeDownload('video');
 }
 
 function beforeDownload(kind) {
-  document.getElementById('btnDownloadAudio').disabled = true;
-  document.getElementById('btnDownloadVideo').disabled = true;
-  document.getElementById('btnAbort').disabled         = false;
+  // The download buttons stay live: adding to the queue while it runs is the
+  // whole point. Only Abort changes state here.
+  document.getElementById('btnAbort').disabled = false;
   resetProviders();
   pulseProgress();
   setStatus(kind === 'video' ? 'Downloading video…' : 'Downloading…');
   startPolling();
+}
+
+// ── SponsorBlock categories ───────────────────────────────────────────────────
+const SB_LABELS = {
+  sponsor:     'Sponsor spots',
+  selfpromo:   'Unpaid self-promotion',
+  interaction: '“Like and subscribe”',
+  intro:       'Intro / title card',
+  outro:       'Outro / end cards',
+  preview:     'Recap or preview',
+  filler:      'Tangents and filler',
+};
+
+function buildSponsorCats(all, selected) {
+  const box = document.getElementById('sbCats');
+  box.innerHTML = all.map(c =>
+    '<label style="display:block">' +
+      `<input type="checkbox" value="${escapeAttr(c)}"` +
+      `${selected.includes(c) ? ' checked' : ''}> ` +
+      escapeHtml(SB_LABELS[c] || c) +
+    '</label>').join('');
+}
+
+function toggleSponsorCats() {
+  document.getElementById('sbCats').style.display =
+    document.getElementById('sSponsorblock').checked ? '' : 'none';
+}
+
+// ── Search ────────────────────────────────────────────────────────────────────
+function fmtDuration(sec) {
+  if (!sec) return '';
+  const m = Math.floor(sec / 60), s = String(sec % 60).padStart(2, '0');
+  return `${m}:${s}`;
+}
+
+async function runSearch(kind) {
+  const box   = document.getElementById(kind === 'video' ? 'searchVideo' : 'searchAudio');
+  const panel = document.getElementById(kind === 'video' ? 'searchResultsVideo' : 'searchResultsAudio');
+  const q = box.value.trim();
+  if (!q) return;
+
+  panel.style.display = '';
+  panel.innerHTML = '<div class="queue-empty">Searching…</div>';
+  const r = await api('search', q, 8);
+  if (!r.ok) {
+    panel.innerHTML = `<div class="queue-empty">${escapeHtml(r.msg)}</div>`;
+    return;
+  }
+  panel.innerHTML = r.results.map(x =>
+    `<div class="search-row" onclick="pickResult('${kind}', ${JSON.stringify(x.url).replace(/"/g,'&quot;')})">` +
+      `<span class="search-title">${escapeHtml(x.title)}</span>` +
+      `<span class="search-meta">${escapeHtml(x.uploader)}${x.duration ? ' · ' + fmtDuration(x.duration) : ''}</span>` +
+    '</div>').join('');
+}
+
+function pickResult(kind, url) {
+  // Fill the URL box rather than downloading straight away — the user still
+  // wants to set format/quality, and a click that silently starts a job is
+  // exactly the kind of surprise this app shouldn't have.
+  document.getElementById(kind === 'video' ? 'urlInputVideo' : 'urlInput').value = url;
+  document.getElementById(kind === 'video' ? 'searchResultsVideo' : 'searchResultsAudio')
+          .style.display = 'none';
+}
+
+// ── History ───────────────────────────────────────────────────────────────────
+let _qhPanel = 'queue';
+
+function showQueuePanel(which) {
+  _qhPanel = which;
+  document.getElementById('queueWrap').style.display   = which === 'queue' ? '' : 'none';
+  document.getElementById('historyWrap').style.display = which === 'queue' ? 'none' : '';
+  document.getElementById('qhTabQueue').classList.toggle('active', which === 'queue');
+  document.getElementById('qhTabHist').classList.toggle('active', which !== 'queue');
+  const act = document.getElementById('queuePanelAction');
+  act.textContent = which === 'queue' ? 'clear finished' : 'clear history';
+  if (which !== 'queue') refreshHistory();
+}
+
+function queuePanelAction() {
+  if (_qhPanel === 'queue') clearFinished(); else clearHistory();
+}
+
+function whenLabel(ts) {
+  const d = new Date(ts * 1000), now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  return sameDay
+    ? d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})
+    : d.toLocaleDateString([], {month: 'short', day: 'numeric'});
+}
+
+function renderHistory(entries) {
+  const box = document.getElementById('historyWrap');
+  if (!entries || !entries.length) {
+    box.innerHTML = '<div class="queue-empty">No downloads yet.</div>';
+    return;
+  }
+  box.innerHTML = entries.map(e => {
+    const ok   = e.status === 'done';
+    const mark = ok ? '✓' : (e.status === 'cancelled' ? '—' : '✗');
+    // Only offer "open folder" when the file is actually still there —
+    // a dead button that silently does nothing is worse than no button.
+    const act = (ok && e.exists)
+      ? `<span class="queue-x" title="Show in folder" onclick="revealFile(${JSON.stringify(e.path).replace(/"/g,'&quot;')})">📂</span>`
+      : `<span class="queue-x" title="Download again" onclick="redownload(${JSON.stringify(e.url).replace(/"/g,'&quot;')},'${e.kind}')">↻</span>`;
+    return '<div class="queue-row">' +
+      `<span class="queue-badge ${ok ? 'hist-ok' : 'hist-bad'}">${mark}</span>` +
+      `<span class="hist-when">${whenLabel(e.ts)}</span>` +
+      `<span class="queue-url" title="${escapeAttr(e.url)}">` +
+        escapeHtml(e.title || e.url) +
+      '</span>' + act + '</div>';
+  }).join('');
+}
+
+async function refreshHistory() { renderHistory(await api('get_history')); }
+async function clearHistory() {
+  const r = await api('clear_history');
+  appendLog(`Cleared ${r.removed} history entr${r.removed === 1 ? 'y' : 'ies'}.`, 'warn');
+  refreshHistory();
+}
+async function revealFile(path) {
+  const r = await api('reveal_file', path);
+  if (!r.ok) appendLog(r.msg, 'warn');
+}
+function redownload(url, kind) {
+  // Drop the URL back into the right tab and let the user hit Download, rather
+  // than silently starting a job from a panel they're only browsing.
+  switchTab(kind === 'video' ? 'video' : 'audio');
+  document.getElementById(kind === 'video' ? 'urlInputVideo' : 'urlInput').value = url;
+}
+
+// ── Site sign-in (cookies) ────────────────────────────────────────────────────
+async function startLogin() {
+  const url = document.getElementById('loginUrl').value.trim();
+  const r = await api('browser_login', url);
+  if (!r.ok) { appendLog(r.msg, 'err'); return; }
+  document.getElementById('btnLogin').disabled = true;
+  appendLog('A browser window is opening — sign in there, then close it.', 'warn');
+  startPolling();   // the worker reports progress through the normal log feed
+}
+
+function renderCookies(sites) {
+  const box = document.getElementById('cookieList');
+  if (!sites || !sites.length) {
+    box.innerHTML = '<div class="label-sm">No saved sessions.</div>';
+    return;
+  }
+  box.innerHTML = sites.map(s =>
+    '<div class="queue-row">' +
+      `<span class="queue-url"><b>${escapeHtml(s.site)}</b> ` +
+      `<span style="color:var(--win-dark)">— ${s.count} cookies, ` +
+      `${s.age_days === 0 ? 'saved today' : s.age_days + 'd old'}</span></span>` +
+      `<span class="queue-x" title="Forget" onclick="forgetCookies('${escapeAttr(s.site)}')">×</span>` +
+    '</div>').join('');
+}
+
+async function refreshCookies() { renderCookies(await api('list_cookies')); }
+async function forgetCookies(site) {
+  const r = await api('forget_cookies', site);
+  renderCookies(r.sites);
+}
+async function forgetAllCookies() {
+  const r = await api('forget_all_cookies');
+  renderCookies(r.sites);
+  appendLog(`Forgot ${r.removed} saved session(s).`, 'warn');
+}
+
+// ── Queue ─────────────────────────────────────────────────────────────────────
+const QUEUE_BADGE = {
+  pending:   ['·', 'waiting'],
+  running:   ['▶', 'downloading'],
+  done:      ['✓', 'finished'],
+  failed:    ['✗', 'failed'],
+  cancelled: ['—', 'cancelled'],
+};
+
+function renderQueue(jobs) {
+  const wrap = document.getElementById('queueWrap');
+  const active = jobs.filter(j => j.status === 'pending' || j.status === 'running').length;
+  document.getElementById('queueCount').textContent =
+    jobs.length ? `${active} active / ${jobs.length} total` : 'empty';
+
+  if (!jobs.length) {
+    wrap.innerHTML = '<div class="queue-empty">Nothing queued.</div>';
+    return;
+  }
+  wrap.innerHTML = jobs.map(j => {
+    const [badge, title] = QUEUE_BADGE[j.status] || ['?', j.status];
+    // A finished item can be re-run; a pending one can be dropped. The running
+    // item offers neither — Abort is the only way to stop it.
+    const action = (j.status === 'pending')
+      ? `<span class="queue-x" title="Remove" onclick="removeJob(${j.id})">×</span>`
+      : (j.status === 'failed' || j.status === 'cancelled')
+        ? `<span class="queue-x" title="Retry" onclick="retryJob(${j.id})">↻</span>`
+        : '<span class="queue-x" style="visibility:hidden">×</span>';
+    return `<div class="queue-row ${j.status}">` +
+             `<span class="queue-badge" title="${title}">${badge}</span>` +
+             `<span class="queue-kind">${j.kind === 'video' ? 'video' : 'audio'}</span>` +
+             `<span class="queue-url" title="${escapeAttr(j.url)}">${escapeHtml(j.url)}</span>` +
+             action +
+           '</div>';
+  }).join('');
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+const escapeAttr = escapeHtml;
+
+// These can be clicked while the queue is idle and polling is stopped, so they
+// refresh the list themselves rather than waiting for a 'queue' event.
+async function refreshQueue() {
+  renderQueue(await api('get_queue') || []);
+}
+async function removeJob(id)   { await api('remove_job', id);   refreshQueue(); }
+async function clearFinished() { await api('clear_finished');   refreshQueue(); }
+async function retryJob(id) {
+  const r = await api('retry_job', id);
+  if (r && r.ok === false) { appendLog(r.msg, 'warn'); return; }
+  document.getElementById('btnAbort').disabled = false;
+  startPolling();
+  refreshQueue();
 }
 
 async function abortDownload() {
@@ -1213,7 +1615,14 @@ async function pollUpdates() {
     else if (u.kind === 'success')          showSuccessStar();
     else if (u.kind === 'prompt')           showPrompt(u.question);
     else if (u.kind === 'album_progress')   setStatus(`Album: track ${u.current} of ${u.total}…`);
+    else if (u.kind === 'queue')            renderQueue(u.jobs || []);
+    else if (u.kind === 'history')          { if (_qhPanel === 'history') renderHistory(u.entries || []); }
+    else if (u.kind === 'login_state') {
+      document.getElementById('btnLogin').disabled = !!u.busy;
+      if (u.sites) renderCookies(u.sites);
+    }
     else if (u.kind === 'done') {
+      // 'done' now means the whole queue drained, not one download.
       stopPolling();
       document.getElementById('btnDownloadAudio').disabled = false;
       document.getElementById('btnDownloadVideo').disabled = false;
@@ -1340,6 +1749,17 @@ async function saveSettings() {
     autoFallback: document.getElementById('sAutoFallback').checked,
     proxy:        document.getElementById('sProxy').value.trim(),
     debugLog:     document.getElementById('sDebugLog').checked,
+    notifyDone:   document.getElementById('sNotifyDone').checked,
+    outtmplAudio: document.getElementById('sOuttmplAudio').value.trim(),
+    outtmplVideo: document.getElementById('sOuttmplVideo').value.trim(),
+    subLangs:     document.getElementById('sSubLangs').value.trim() || 'en',
+    sponsorblock: document.getElementById('sSponsorblock').checked,
+    sponsorblockCats: Array.from(
+      document.querySelectorAll('#sbCats input[type=checkbox]:checked')
+    ).map(c => c.value),
+    embedChapters: document.getElementById('sEmbedChapters').checked,
+    concurrentFragments: parseInt(document.getElementById('sConcurrentFragments').value, 10) || 5,
+    rateLimitKbps:       parseInt(document.getElementById('sRateLimit').value, 10) || 0,
   };
   const r = await api('save_settings', data);
   const el = document.getElementById('saveResult');
@@ -1358,10 +1778,24 @@ async function init() {
   // Initialize audio format slider
   onAudioFormatChange();
 
+  // Queue + saved sign-ins survive a reload of the UI, so show what's there.
+  refreshQueue();
+  refreshCookies();
+
   // Settings tab pre-fill
   document.getElementById('sAutoFallback').checked = d.autoFallback;
   document.getElementById('sProxy').value          = d.proxy || '';
   document.getElementById('sDebugLog').checked     = !!d.debugLog;
+  document.getElementById('sNotifyDone').checked   = d.notifyDone !== false;
+  document.getElementById('sOuttmplAudio').value   = d.outtmplAudio || '';
+  document.getElementById('sOuttmplVideo').value   = d.outtmplVideo || '';
+  document.getElementById('sSubLangs').value       = d.subLangs || 'en';
+  document.getElementById('sSponsorblock').checked = !!d.sponsorblock;
+  document.getElementById('sEmbedChapters').checked= !!d.embedChapters;
+  document.getElementById('sConcurrentFragments').value = d.concurrentFragments || 5;
+  document.getElementById('sRateLimit').value          = d.rateLimitKbps || 0;
+  buildSponsorCats(d.sponsorblockAll || [], d.sponsorblockCats || []);
+  toggleSponsorCats();
   document.getElementById('sDebugLogPath').textContent = d.debugLogPath ? `Log: ${d.debugLogPath}` : '';
   const fmtRadio = document.querySelector(`input[name=fmt][value="${d.qobuzFormat}"]`);
   if (fmtRadio) fmtRadio.checked = true;
