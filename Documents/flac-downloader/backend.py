@@ -429,15 +429,34 @@ def _browser_grab(page_url, log, timeout=60, attempts=3, should_abort=None):
 # all of them without knowing which is which. Adding an operation is this
 # function plus a line in _MEDIAOP_VERB, not another worker and another flag.
 
-def _op_clip(exe, src, out_dir, params, **cb) -> dict:
+# on_stage is offered to every op but only wanted by the multi-stage ones, so
+# the single-stage wrappers swallow it rather than each op growing a parameter
+# it ignores.
+
+def _op_clip(exe, src, out_dir, params, on_stage=None, **cb) -> dict:
     return mediaops.clip(exe, src, params.get("start", 0.0),
                          params.get("end", 0.0), out_dir,
                          fast=params.get("fast", False), **cb)
 
 
-_MEDIAOPS = {"clip": _op_clip}
+def _op_sheet(exe, src, out_dir, params, on_stage=None, **cb) -> dict:
+    return mediaops.contact_sheet(exe, src, out_dir,
+                                  cols=params.get("cols", 4),
+                                  rows=params.get("rows", 4),
+                                  width=params.get("width",
+                                                   mediaops.SHEET_TILE_WIDTH),
+                                  fmt=params.get("fmt", "jpg"), **cb)
 
-_MEDIAOP_VERB = {"clip": "Cutting"}
+
+def _op_fit(exe, src, out_dir, params, **cb) -> dict:
+    return mediaops.fit_under(exe, src, out_dir,
+                              target_mb=params.get("target_mb", 25.0), **cb)
+
+
+_MEDIAOPS = {"clip": _op_clip, "sheet": _op_sheet, "fit": _op_fit}
+
+_MEDIAOP_VERB = {"clip": "Cutting", "sheet": "Building a contact sheet for",
+                 "fit": "Shrinking"}
 
 
 def _clock(secs: float) -> str:
@@ -1150,6 +1169,46 @@ class API:
                              ("clip", str(p), out_dir,
                               {"start": start, "end": end, "fast": bool(fast)}))
 
+    def export_sheet(self, path: str, cols: int = 4, rows: int = 4,
+                     fmt: str = "jpg", out_dir: str = "") -> dict:
+        """Queue a contact sheet: the whole video as one grid of stills."""
+        p = Path(path or "")
+        if not p.is_file():
+            return {"ok": False, "msg": "That file is no longer there."}
+        cols, rows = max(1, int(cols or 1)), max(1, int(rows or 1))
+        if cols * rows > mediaops.SHEET_MAX_TILES:
+            return {"ok": False,
+                    "msg": f"That's {cols * rows} tiles — keep it to "
+                           f"{mediaops.SHEET_MAX_TILES}."}
+        return self._enqueue("sheet", f"{cols}×{rows} sheet ← {p.name}",
+                             ("sheet", str(p), out_dir,
+                              {"cols": cols, "rows": rows, "fmt": fmt}))
+
+    def plan_fit(self, path: str, target_mb: float) -> dict:
+        """
+        What a size target would cost, asked before running it.
+
+        Shares its arithmetic with fit_under, so the preview and the refusal
+        can never disagree about whether a target is possible.
+        """
+        return mediaops.plan_fit(self._ffmpeg_exe(), path, target_mb)
+
+    def export_fit(self, path: str, target_mb: float,
+                   out_dir: str = "") -> dict:
+        """Queue a re-encode that lands under `target_mb` decimal megabytes."""
+        p = Path(path or "")
+        if not p.is_file():
+            return {"ok": False, "msg": "That file is no longer there."}
+        # Refuse an impossible target here rather than after a long encode.
+        plan = mediaops.plan_fit(self._ffmpeg_exe(), p, target_mb)
+        if not plan["ok"]:
+            return {"ok": False, "msg": plan["msg"]}
+        if plan["fits_already"]:
+            return {"ok": False, "msg": plan["msg"]}
+        return self._enqueue("fit", f"under {target_mb} MB ← {p.name}",
+                             ("fit", str(p), out_dir,
+                              {"target_mb": float(target_mb)}))
+
     def _worker_mediaop(self, op: str, src: str, out_dir: str, params: dict):
         """
         Run one queued media operation. Shared by every kind in _MEDIAOPS.
@@ -1172,7 +1231,10 @@ class API:
             self._ffmpeg_exe(), src, out_dir, params,
             on_pct=lambda p: self._progress(p if p is not None else 0),
             should_abort=lambda: self._abort_flag,
-            on_proc=lambda pr: setattr(self, "_convert_proc", pr))
+            on_proc=lambda pr: setattr(self, "_convert_proc", pr),
+            # A multi-stage op (analyse, encode, tighten) would otherwise show
+            # one bar restarting for no visible reason.
+            on_stage=lambda msg: self._emit("job_status", msg=msg))
 
         self._convert_proc = None
         self._log(result["msg"], "bright" if result["ok"] else "warn")
@@ -1182,6 +1244,10 @@ class API:
             # Without this the runner records the job as failed no matter what
             # the worker returned.
             self._emit("success", path=result["path"])
+            # "The right thing to do was nothing" is a success, but there is no
+            # file to point a history row at.
+            if result.get("skip"):
+                self._skip_history = True
         else:
             self._progress(0)
             # Same rule as a frame extraction: History records the files these

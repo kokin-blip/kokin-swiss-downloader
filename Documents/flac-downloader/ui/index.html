@@ -1294,6 +1294,8 @@ hr.separator {
         <div class="hist-actions" id="histActions" style="display:none">
           <button class="btn" id="histTabInfo"   onclick="histPanel('info')">Info</button>
           <button class="btn" id="histTabClip"   onclick="histPanel('clip')">Clip</button>
+          <button class="btn" id="histTabSheet"  onclick="histPanel('sheet')">Sheet</button>
+          <button class="btn" id="histTabFit"    onclick="histPanel('fit')">Shrink</button>
           <button class="btn" id="histTabFrames" onclick="histPanel('frames')">Frames</button>
           <span class="spacer"></span>
           <div class="hist-xbar" id="histXBar" style="display:none">
@@ -1321,6 +1323,37 @@ hr.separator {
             <input type="checkbox" id="histClipFast"> Fast cut
           </label>
           <button class="btn" id="histClipBtn" onclick="histExportClip()">Save clip</button>
+        </div>
+
+        <!-- Panel: the whole video as one grid of stills. -->
+        <div class="hist-panel" id="histPanelSheet" style="display:none">
+          <span class="label-sm">Grid</span>
+          <select class="form-control" id="histSheetCols" onchange="histSheetHint()">
+            <option>2</option><option>3</option><option selected>4</option>
+            <option>5</option><option>6</option>
+          </select>
+          <span class="label-sm">×</span>
+          <select class="form-control" id="histSheetRows" onchange="histSheetHint()">
+            <option>2</option><option>3</option><option selected>4</option>
+            <option>5</option><option>6</option>
+          </select>
+          <select class="form-control" id="histSheetFmt" style="width:58px">
+            <option value="jpg">JPEG</option>
+            <option value="png">PNG</option>
+          </select>
+          <button class="btn" id="histSheetBtn" onclick="histExportSheet()">Save sheet</button>
+        </div>
+
+        <!-- Panel: re-encode to land under a size limit. -->
+        <div class="hist-panel" id="histPanelFit" style="display:none">
+          <span class="label-sm">Fit under</span>
+          <input type="text" class="form-control" id="histFitMB" value="25"
+                 oninput="histFitHintSoon()">
+          <span class="label-sm">MB</span>
+          <button class="btn" onclick="histFitPreset(10)" title="Discord, free">10</button>
+          <button class="btn" onclick="histFitPreset(25)" title="Gmail, Discord Nitro Basic">25</button>
+          <button class="btn" onclick="histFitPreset(50)">50</button>
+          <button class="btn" id="histFitBtn" onclick="histExportFit()">Shrink</button>
         </div>
 
         <!-- Panel: bulk frame extraction. -->
@@ -2090,7 +2123,7 @@ function fmtBytes(n) {
 // not something that can be re-run from a URL. Anything listed here gets no ↻
 // and never reaches the download tabs — otherwise the button pastes a
 // sentence into the Audio URL box.
-const LOCAL_KINDS = new Set(['convert', 'frames', 'clip']);
+const LOCAL_KINDS = new Set(['convert', 'frames', 'clip', 'sheet', 'fit']);
 
 function fmtClock(s, withCentis) {
   if (!isFinite(s) || s < 0) s = 0;
@@ -2227,6 +2260,8 @@ let _histInfo = null;
 const HIST_PANELS = {
   info:   {tab: 'histTabInfo',   el: 'histPanelInfo',   kinds: ['video', 'audio', 'image']},
   clip:   {tab: 'histTabClip',   el: 'histPanelClip',   kinds: ['video', 'audio']},
+  sheet:  {tab: 'histTabSheet',  el: 'histPanelSheet',  kinds: ['video']},
+  fit:    {tab: 'histTabFit',    el: 'histPanelFit',    kinds: ['video']},
   frames: {tab: 'histTabFrames', el: 'histPanelFrames', kinds: ['video']},
 };
 
@@ -2245,8 +2280,10 @@ function histPanel(name) {
   }
   // The hint line under the panels is shared, so whoever takes the panel owns
   // it — otherwise "About 340 images" stays on screen next to the clip fields.
-  if (name === 'frames') onHistModeChange();
-  else if (name === 'clip') histClipHint();
+  if (name === 'frames')     onHistModeChange();
+  else if (name === 'clip')  histClipHint();
+  else if (name === 'sheet') histSheetHint();
+  else if (name === 'fit')   histFitHint();
   else {
     document.getElementById('histXHint').innerHTML = '&nbsp;';
     document.getElementById('histXHint').style.color = '';
@@ -2480,6 +2517,91 @@ async function histSaveFrame() {
   }
 }
 
+// ── Contact sheet ─────────────────────────────────────────────────────────────
+
+function histSheetHint() {
+  const c = +document.getElementById('histSheetCols').value;
+  const r = +document.getElementById('histSheetRows').value;
+  const e = histCurrent();
+  const hint = document.getElementById('histXHint');
+  hint.style.color = '';
+  const span = (_histInfo && _histInfo.duration)
+    ? ` — one frame roughly every ${fmtClock(_histInfo.duration / (c * r), false)}` : '';
+  hint.textContent = `${c * r} stills in one image${span}.`;
+}
+
+async function histExportSheet() {
+  const e = histCurrent();
+  if (!e) return;
+  const hint = document.getElementById('histXHint');
+  const r = await api('export_sheet', e.path,
+                      +document.getElementById('histSheetCols').value,
+                      +document.getElementById('histSheetRows').value,
+                      document.getElementById('histSheetFmt').value, '');
+  if (!r.ok) {
+    hint.textContent = r.msg || "Couldn't start.";
+    hint.style.color = '#aa0000';
+    return;
+  }
+  histBusy(true);
+  hint.textContent = 'Building the sheet…';
+  hint.style.color = '';
+  startPolling();
+}
+
+// ── Fit under a size limit ────────────────────────────────────────────────────
+
+let _fitHintTimer = null;
+
+function histFitPreset(mb) {
+  document.getElementById('histFitMB').value = mb;
+  histFitHint();
+}
+
+// Each hint costs an ffmpeg probe, so don't fire one per keystroke — someone
+// typing "100" would otherwise spawn three.
+function histFitHintSoon() {
+  clearTimeout(_fitHintTimer);
+  _fitHintTimer = setTimeout(histFitHint, 400);
+}
+
+async function histFitHint() {
+  const e = histCurrent();
+  const hint = document.getElementById('histXHint');
+  if (!e) return;
+  const mb = parseFloat(document.getElementById('histFitMB').value);
+  if (!isFinite(mb) || mb <= 0) {
+    hint.textContent = 'Enter a size in MB.';
+    hint.style.color = '#aa0000';
+    return;
+  }
+  const p = await api('plan_fit', e.path, mb);
+  // Slow probe + fast typing: a stale answer must not overwrite a newer one.
+  if (histCurrent() !== e) return;
+  hint.textContent = p.msg || '';
+  hint.style.color = p.ok ? (p.fits_already ? '#006600' : '') : '#aa6600';
+}
+
+async function histExportFit() {
+  const e = histCurrent();
+  if (!e) return;
+  const hint = document.getElementById('histXHint');
+  const mb = parseFloat(document.getElementById('histFitMB').value);
+  if (!isFinite(mb) || mb <= 0) { histFitHint(); return; }
+
+  const r = await api('export_fit', e.path, mb, '');
+  if (!r.ok) {
+    hint.textContent = r.msg || "Couldn't start.";
+    // "It already fits" is good news, not an error.
+    hint.style.color = /already/i.test(r.msg || '') ? '#006600' : '#aa6600';
+    return;
+  }
+  histBusy(true);
+  hint.textContent = 'Shrinking — this one re-encodes, so give it a minute…';
+  hint.style.color = '';
+  startPolling();
+}
+
 // ── Automatic frame extraction ────────────────────────────────────────────────
 
 const HIST_MODES = {
@@ -2543,8 +2665,9 @@ async function histExtract() {
 // (extraction on its own thread, everything else on the job queue), so one
 // bar, one Stop button and one disabled set is the honest representation.
 function histBusy(on) {
-  document.getElementById('histXBtn').disabled = on;
-  document.getElementById('histClipBtn').disabled = on;
+  for (const id of ['histXBtn', 'histClipBtn', 'histSheetBtn', 'histFitBtn']) {
+    document.getElementById(id).disabled = on;
+  }
   document.getElementById('histXBar').style.display  = on ? '' : 'none';
   document.getElementById('histXStop').style.display = on ? '' : 'none';
   if (on) histExtractProgress(0);
@@ -2585,6 +2708,8 @@ const LOCAL_KIND_HINT = {
   convert: ['convert', 'That was a conversion — pick the files again to repeat it.'],
   frames:  ['history', 'That was a frame extraction — pick the video again to repeat it.'],
   clip:    ['history', 'That was a clip — pick the video again to cut another.'],
+  sheet:   ['history', 'That was a contact sheet — pick the video again to rebuild it.'],
+  fit:     ['history', 'That was a resize — pick the video again to redo it.'],
 };
 
 function redownload(url, kind) {
@@ -2650,7 +2775,7 @@ const QUEUE_BADGE = {
 // Every job kind needs an entry; a missing one prints the raw kind and
 // overflows the badge.
 const QUEUE_KIND = { audio: 'audio', video: 'video', convert: 'conv',
-                     clip: 'clip' };
+                     clip: 'clip', sheet: 'sheet', fit: 'size' };
 
 function renderQueue(jobs) {
   const wrap = document.getElementById('queueWrap');
