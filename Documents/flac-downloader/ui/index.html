@@ -677,7 +677,44 @@ hr.separator {
   overflow: hidden; position: relative;
 }
 .hist-stage video, .hist-stage img { max-width: 100%; max-height: 100%; display: block; }
-.hist-stage audio { width: 92%; }
+/* The native <audio> chrome is a rounded dark Chromium pill: against a Win95
+   window it reads as a browser that wandered in. Same element and same events
+   underneath — only the controls are ours, drawn from the same bevels as every
+   other widget here. The element itself stays in the DOM (hidden) because
+   histUnload, the tag editor's file-lock dance and histTick all address it. */
+.aplayer {
+  display: flex; gap: 8px; align-items: center; width: 100%;
+  padding: 10px; background: var(--win-gray);
+  box-shadow: inset -1px -1px 0 var(--win-darker), inset  1px  1px 0 var(--win-light),
+              inset -2px -2px 0 var(--win-dark),   inset  2px  2px 0 var(--win-lighter);
+}
+.aplayer audio { display: none; }
+.aplayer-art {
+  width: 84px; height: 84px; flex: 0 0 auto; background: var(--win-dark);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 34px; color: var(--win-lighter); overflow: hidden;
+  box-shadow: inset 1px 1px 0 var(--win-darker), inset -1px -1px 0 var(--win-light);
+}
+.aplayer-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.aplayer-body { flex: 1 1 auto; min-width: 0; }
+.aplayer-title {
+  font-size: 11px; padding: 2px 4px; margin-bottom: 7px;
+  background: var(--win-blue); color: #fff;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.aplayer-row { display: flex; gap: 5px; align-items: center; }
+.aplayer-row + .aplayer-row { margin-top: 7px; }
+/* .btn is a 75px-min dialog button; transport keys want to be square. */
+.aplayer .btn {
+  min-width: 0; width: 28px; height: 21px; padding: 0;
+  font-size: 10px; line-height: 19px;
+}
+/* Needs to outrank input[type=range]{flex:1}, which is a same-specificity
+   selector — hence the element qualifier, not a bare class. */
+.aplayer input.aplayer-vol { flex: 0 0 74px; }
+/* Audio has no picture, so the letterbox the video stage needs is just a black
+   void around a small panel. Collapse it and let the player set the height. */
+.hist-stage.audio { height: auto; background: var(--win-gray); }
 .hist-stage-msg { color: var(--win-dark); font-size: 10px; padding: 0 12px;
                   text-align: center; line-height: 1.6; }
 .hist-ctl { display: flex; gap: 4px; align-items: center; margin-top: 4px; }
@@ -753,6 +790,37 @@ hr.separator {
   z-index: 9000;
 }
 #updateOverlay.active { display: flex; }
+
+/* ── Tag editor modal ─────────────────────────────────────────────────────── */
+#tagOverlay {
+  display: none; position: fixed; inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  align-items: center; justify-content: center; z-index: 9000;
+}
+#tagOverlay.active { display: flex; }
+.tag-grid { display: grid; grid-template-columns: auto 1fr auto; gap: 3px 6px;
+            align-items: center; }
+.tag-grid label { font-size: 10px; color: var(--win-dark); text-align: right; }
+.tag-grid input.form-control { width: 100%; }
+/* The clear box is deliberately its own column and its own deliberate act:
+   emptying a text field must never be what deletes somebody's metadata. */
+.tag-clear { display: flex; align-items: center; gap: 2px; font-size: 9px;
+             color: var(--win-dark); white-space: nowrap; }
+.tag-cover { display: flex; gap: 6px; align-items: center; margin-top: 6px;
+             padding-top: 6px; border-top: 1px solid var(--win-dark); }
+.tag-cover-box { width: 56px; height: 56px; flex: 0 0 auto; background: #000;
+                 display: flex; align-items: center; justify-content: center;
+                 color: var(--win-dark); font-size: 9px; overflow: hidden; }
+.tag-cover-box img { width: 100%; height: 100%; object-fit: cover; }
+/* Hidden via an inline style in the markup, not here — the rest of the file
+   toggles panels with style.display = '', which would fall straight back to a
+   display:none living in the stylesheet. */
+.tag-results { max-height: 108px; overflow-y: auto; background: #fff;
+               margin-top: 4px;
+               box-shadow: inset 1px 1px 0 var(--win-darker),
+                           inset -1px -1px 0 var(--win-light); }
+.tag-result { padding: 2px 4px; font-size: 10px; cursor: pointer; }
+.tag-result:hover { background: var(--win-blue); color: var(--win-light); }
 .update-notes {
   background: #fff;
   padding: 6px 8px;
@@ -931,6 +999,44 @@ hr.separator {
       <div class="prompt-buttons" id="updateButtons">
         <button class="btn" id="updateInstallBtn" onclick="startInstall()" style="font-weight:bold">Update Now</button>
         <button class="btn" onclick="document.getElementById('updateOverlay').classList.remove('active')">Later</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="tagOverlay">
+    <div class="prompt-window" style="min-width:440px;max-width:520px">
+      <div class="prompt-titlebar">🏷 Edit tags</div>
+      <div class="prompt-body" style="flex-direction:column;gap:4px;align-items:stretch">
+        <div class="label-sm" id="tagFileName" style="font-weight:bold"></div>
+
+        <div class="flex-row" style="gap:4px">
+          <input type="text" class="form-control" id="tagSearch" spellcheck="false"
+                 placeholder="Search for this track to fill the fields…"
+                 style="flex:1 1 auto">
+          <button class="btn" id="tagSearchBtn" onclick="tagFetch()">Look up</button>
+        </div>
+        <div class="tag-results" id="tagResults" style="display:none"></div>
+
+        <div class="tag-grid" id="tagGrid"></div>
+
+        <div class="tag-cover">
+          <div class="tag-cover-box" id="tagCoverBox">none</div>
+          <div style="flex:1 1 auto">
+            <div class="flex-row" style="gap:4px">
+              <button class="btn" id="tagCoverPick" onclick="tagPickCover()">Choose image…</button>
+              <button class="btn" id="tagCoverClear" onclick="tagClearCover()">Remove</button>
+            </div>
+            <div class="label-sm" id="tagCoverNote" style="margin-top:3px">&nbsp;</div>
+          </div>
+        </div>
+
+        <div class="label-sm" id="tagMsg" style="margin-top:4px">&nbsp;</div>
+      </div>
+      <div class="prompt-buttons">
+        <button class="btn" id="tagSaveBtn" onclick="tagSave()" style="font-weight:bold">Save</button>
+        <button class="btn" id="tagResetBtn" onclick="tagReset()"
+                title="Put every box back to what is on the file right now">Reset</button>
+        <button class="btn" onclick="tagClose()">Cancel</button>
       </div>
     </div>
   </div>
@@ -1297,6 +1403,10 @@ hr.separator {
           <button class="btn" id="histTabSheet"  onclick="histPanel('sheet')">Sheet</button>
           <button class="btn" id="histTabFit"    onclick="histPanel('fit')">Shrink</button>
           <button class="btn" id="histTabFrames" onclick="histPanel('frames')">Frames</button>
+          <!-- Not a panel: tags open a modal, because eight fields plus cover
+               art will not fit in the strip under the player. -->
+          <button class="btn" id="histTabTags" onclick="tagOpen()"
+                  style="display:none">Tags…</button>
           <span class="spacer"></span>
           <div class="hist-xbar" id="histXBar" style="display:none">
             <div class="hist-xfill" id="histXFill"></div>
@@ -2248,8 +2358,10 @@ function jsArg(s) {
 }
 
 function histStageMsg(text) {
-  document.getElementById('histStage').innerHTML =
-    `<div class="hist-stage-msg">${escapeHtml(text)}</div>`;
+  const stage = document.getElementById('histStage');
+  // A message needs the full-height stage back, whatever was here before.
+  stage.classList.remove('audio');
+  stage.innerHTML = `<div class="hist-stage-msg">${escapeHtml(text)}</div>`;
 }
 
 // The panel currently open, so the choice survives clicking between files.
@@ -2280,6 +2392,11 @@ function histPanel(name) {
   }
   // The hint line under the panels is shared, so whoever takes the panel owns
   // it — otherwise "About 340 images" stays on screen next to the clip fields.
+  // Tags is a button, not a panel — it opens a modal — but it belongs to the
+  // same row and follows the same "hide what doesn't apply" rule.
+  document.getElementById('histTabTags').style.display =
+    tagCanEdit(_histInfo) ? '' : 'none';
+
   if (name === 'frames')     onHistModeChange();
   else if (name === 'clip')  histClipHint();
   else if (name === 'sheet') histSheetHint();
@@ -2293,6 +2410,7 @@ function histPanel(name) {
 function histHidePanels() {
   document.getElementById('histCtl').style.display = 'none';
   document.getElementById('histActions').style.display = 'none';
+  document.getElementById('histTabTags').style.display = 'none';
   for (const p of Object.values(HIST_PANELS)) {
     document.getElementById(p.el).style.display = 'none';
   }
@@ -2334,11 +2452,42 @@ async function histSelect(i) {
 
   const stage = document.getElementById('histStage');
   const src   = escapeAttr(info.url);
+  stage.classList.remove('audio');
 
   if (info.kind === 'image') {
     stage.innerHTML = `<img src="${src}" alt="">`;
   } else if (info.kind === 'audio') {
-    stage.innerHTML = `<audio id="histVideo" src="${src}" controls autoplay></audio>`;
+    stage.classList.add('audio');
+    stage.innerHTML = `
+      <div class="aplayer">
+        <div class="aplayer-art" id="aplayArt">&#9835;</div>
+        <div class="aplayer-body">
+          <div class="aplayer-title" id="aplayTitle"></div>
+          <div class="aplayer-row">
+            <button class="btn" id="aplayPlay" onclick="histPlayPause()"
+                    title="Play / pause">&#9654;</button>
+            <button class="btn" onclick="histStop()" title="Stop">&#9632;</button>
+            <input type="range" id="aplaySeek" min="0" max="1000" value="0"
+                   oninput="histScrub()" title="Seek">
+            <span class="hist-clock" id="aplayClock">0:00 / 0:00</span>
+          </div>
+          <div class="aplayer-row">
+            <label class="label-sm" for="aplayVol">Vol</label>
+            <input type="range" class="aplayer-vol" id="aplayVol" min="0" max="100"
+                   value="100" oninput="histVol()" title="Volume">
+          </div>
+        </div>
+        <audio id="histVideo" src="${src}" autoplay></audio>
+      </div>`;
+    document.getElementById('aplayTitle').textContent = e.title || info.name || '';
+    // thumb_for pulls embedded artwork out of any format, so cover art in the
+    // player is a call we already have rather than a new code path.
+    api('thumb_for', e.path).then(t => {
+      const art = document.getElementById('aplayArt');
+      if (art && _histSelPath === e.path && t.ok && t.url) {
+        art.innerHTML = `<img src="${escapeAttr(t.url)}" alt="">`;
+      }
+    }).catch(() => { /* no artwork is not an error */ });
   } else {
     // Video: crossorigin lets the canvas be read if we ever want a client-side
     // grab; the media server sends the matching Access-Control-Allow-Origin.
@@ -2351,6 +2500,10 @@ async function histSelect(i) {
     v.addEventListener('timeupdate', histTick);
     v.addEventListener('seeked',     histTick);
     v.addEventListener('loadedmetadata', histTick);
+    // The custom transport has to be told; the native one knew by itself.
+    v.addEventListener('play',  histPlayGlyph);
+    v.addEventListener('pause', histPlayGlyph);
+    v.addEventListener('ended', histPlayGlyph);
     v.addEventListener('error', () => histStageMsg(
       "This one won't play in the preview window — 📂 opens it in your player."));
   }
@@ -2484,8 +2637,57 @@ async function histExportClip() {
 function histTick() {
   const v = document.getElementById('histVideo');
   if (!v) return;
-  document.getElementById('histClock').textContent =
-    `${fmtClock(v.currentTime, true)} / ${fmtClock(v.duration || 0, false)}`;
+  const cur = v.currentTime, dur = v.duration || 0;
+  // Video keeps centiseconds — it exists to land on a frame. Audio doesn't.
+  const clock = document.getElementById('histClock');
+  if (clock) clock.textContent = `${fmtClock(cur, true)} / ${fmtClock(dur, false)}`;
+
+  const aclock = document.getElementById('aplayClock');
+  if (aclock) aclock.textContent = `${fmtClock(cur, false)} / ${fmtClock(dur, false)}`;
+  const seek = document.getElementById('aplaySeek');
+  if (seek && dur > 0) seek.value = Math.round(cur / dur * 1000);
+}
+
+// ── Win95 audio transport ─────────────────────────────────────────────────────
+// All four drive the same <audio id="histVideo"> the native controls used to,
+// so every other consumer of it (histUnload, save_tags' file-lock sequence,
+// the clip in/out buttons) is untouched.
+
+function histPlayPause() {
+  const v = document.getElementById('histVideo');
+  if (!v) return;
+  if (v.paused) v.play().catch(() => { /* autoplay policy, not our problem */ });
+  else v.pause();
+}
+
+function histStop() {
+  const v = document.getElementById('histVideo');
+  if (!v) return;
+  v.pause();
+  v.currentTime = 0;
+  histTick();
+}
+
+function histScrub() {
+  const v = document.getElementById('histVideo');
+  const s = document.getElementById('aplaySeek');
+  if (!v || !s || !(v.duration > 0)) return;
+  // Seeking live on input rather than waiting for change: it's a local file
+  // over the loopback server, and it's what the native control did.
+  v.currentTime = s.value / 1000 * v.duration;
+  histTick();
+}
+
+function histVol() {
+  const v = document.getElementById('histVideo');
+  const s = document.getElementById('aplayVol');
+  if (v && s) v.volume = s.value / 100;
+}
+
+function histPlayGlyph() {
+  const v = document.getElementById('histVideo');
+  const b = document.getElementById('aplayPlay');
+  if (v && b) b.innerHTML = v.paused ? '&#9654;' : '&#10073;&#10073;';
 }
 
 function histStep(dir) {
@@ -2515,6 +2717,233 @@ async function histSaveFrame() {
   } finally {
     btn.disabled = false;
   }
+}
+
+// ── Tag editor ────────────────────────────────────────────────────────────────
+
+// Formats tags.py can actually write. Kept in step with tags.TAGGABLE — WAV
+// and AIFF are absent on purpose; mutagen has no easy layer for either, so a
+// write would fail at save time after the UI had promised it would work.
+const TAGGABLE_EXT = new Set(['mp3', 'flac', 'm4a', 'm4b', 'mp4', 'ogg', 'oga',
+                              'opus', 'wma', 'wv', 'ape']);
+let _tagPath = null;
+let _tagFields = [];
+let _tagCoverPath = '';      // '' = leave the existing cover alone
+let _tagRemoveCover = false;
+// What read_tags handed back, kept verbatim so Reset is one assignment per box
+// rather than per-field undo machinery.
+let _tagOriginal = {};
+let _tagOrigCover = 'none';  // innerHTML of the cover box as opened
+let _tagHadCover = false;
+let _tagCanCover = false;
+
+function tagCanEdit(info) {
+  return !!info && info.kind === 'audio' && TAGGABLE_EXT.has(info.ext || '');
+}
+
+function tagMsg(text, colour) {
+  const el = document.getElementById('tagMsg');
+  el.textContent = text || ' ';
+  el.style.color = colour || '';
+}
+
+async function tagOpen() {
+  const e = histCurrent();
+  if (!e) return;
+  _tagPath = e.path;
+  _tagCoverPath = '';
+  _tagRemoveCover = false;
+
+  document.getElementById('tagOverlay').classList.add('active');
+  document.getElementById('tagFileName').textContent = (_histInfo && _histInfo.name) || '';
+  document.getElementById('tagResults').style.display = 'none';
+  document.getElementById('tagGrid').innerHTML = '<div class="label-sm">Reading…</div>';
+  tagMsg('');
+
+  const r = await api('read_tags', e.path);
+  if (_tagPath !== e.path) return;          // they clicked away while we read
+  if (!r.ok) {
+    document.getElementById('tagGrid').innerHTML = '';
+    tagMsg(r.msg || "Those tags can't be read.", '#aa0000');
+    return;
+  }
+  _tagFields = r.fields || [];
+  _tagOriginal = r.values || {};
+  _tagHadCover = !!r.cover;
+  _tagCanCover = !!r.can_cover;
+
+  document.getElementById('tagGrid').innerHTML = _tagFields.map(f => `
+    <label for="tagf_${f}">${escapeHtml(r.labels[f] || f)}</label>
+    <input type="text" class="form-control" id="tagf_${f}"
+           value="${escapeAttr(r.values[f] || '')}" spellcheck="false"
+           oninput="tagUncheckClear('${f}')">
+    <span class="tag-clear" title="Tick to delete this tag. Emptying the box on its own leaves it unchanged.">
+      <input type="checkbox" id="tagc_${f}" onchange="tagToggleClear('${f}')">clear
+    </span>`).join('');
+
+  // Seed the lookup box from what's already there, so the common case is one
+  // click rather than retyping the artist and title.
+  document.getElementById('tagSearch').value =
+    [r.values.artist, r.values.title].filter(Boolean).join(' ')
+    || (_histInfo ? _histInfo.name.replace(/\.[^.]+$/, '') : '');
+
+  // thumb_for already extracts embedded artwork for any format, so the
+  // current cover is one call we already have rather than a new code path.
+  const box = document.getElementById('tagCoverBox');
+  box.textContent = r.cover ? 'has art' : 'none';
+  _tagOrigCover = box.innerHTML;
+  if (r.cover) {
+    const t = await api('thumb_for', e.path);
+    if (_tagPath === e.path && t.ok && t.url) {
+      box.innerHTML = `<img src="${escapeAttr(t.url)}" alt="">`;
+      _tagOrigCover = box.innerHTML;
+    }
+  }
+  document.getElementById('tagCoverPick').disabled = !r.can_cover;
+  document.getElementById('tagCoverClear').disabled = !r.can_cover || !r.cover;
+  document.getElementById('tagCoverNote').textContent = r.can_cover
+    ? ' ' : 'Cover art is not supported for this format.';
+}
+
+function tagClose() {
+  document.getElementById('tagOverlay').classList.remove('active');
+  _tagPath = null;
+}
+
+// Undo, for the whole form at once. Cheaper than a per-field revert arrow and
+// it covers the cover too, which per-field buttons wouldn't.
+function tagReset() {
+  if (!_tagFields.length) return;
+  for (const f of _tagFields) {
+    const cb = document.getElementById('tagc_' + f);
+    if (cb && cb.checked) { cb.checked = false; tagToggleClear(f); }
+    document.getElementById('tagf_' + f).value = _tagOriginal[f] || '';
+  }
+  _tagCoverPath = '';
+  _tagRemoveCover = false;
+  document.getElementById('tagCoverBox').innerHTML = _tagOrigCover;
+  document.getElementById('tagCoverClear').disabled = !_tagCanCover || !_tagHadCover;
+  document.getElementById('tagCoverNote').textContent = _tagCanCover
+    ? ' ' : 'Cover art is not supported for this format.';
+  tagMsg('Back to what is on the file.');
+}
+
+// Ticking clear greys the field, so it's obvious the text no longer matters.
+function tagToggleClear(f) {
+  const on = document.getElementById('tagc_' + f).checked;
+  const input = document.getElementById('tagf_' + f);
+  input.disabled = on;
+  input.style.opacity = on ? 0.5 : '';
+}
+
+// Typing a value is a statement of intent that contradicts "delete this".
+function tagUncheckClear(f) {
+  const cb = document.getElementById('tagc_' + f);
+  if (cb.checked) { cb.checked = false; tagToggleClear(f); }
+}
+
+async function tagPickCover() {
+  const r = await api('pick_cover');
+  if (!r.ok) { if (r.msg) tagMsg(r.msg, '#aa0000'); return; }
+  _tagCoverPath = r.path;
+  _tagRemoveCover = false;
+  document.getElementById('tagCoverNote').textContent = `New cover: ${r.name}`;
+  document.getElementById('tagCoverClear').disabled = false;
+}
+
+function tagClearCover() {
+  _tagCoverPath = '';
+  _tagRemoveCover = true;
+  document.getElementById('tagCoverBox').textContent = 'none';
+  document.getElementById('tagCoverNote').textContent =
+    'Cover art will be removed when you save.';
+}
+
+async function tagFetch() {
+  const q = document.getElementById('tagSearch').value.trim();
+  const btn = document.getElementById('tagSearchBtn');
+  const box = document.getElementById('tagResults');
+  btn.disabled = true;
+  tagMsg('Searching…');
+  try {
+    const r = await api('fetch_tags', q);
+    if (!r.ok) { box.style.display = 'none'; tagMsg(r.msg, '#aa6600'); return; }
+    // Never auto-apply: a search is a guess, and silently overwriting
+    // somebody's tags with a guess is how a library gets quietly wrecked.
+    box.innerHTML = r.results.map((x, i) =>
+      `<div class="tag-result" onclick="tagApplyResult(${i})">${escapeHtml(x.label)}</div>`
+    ).join('');
+    box.style.display = '';
+    _tagResults = r.results;
+    tagMsg('Pick one to fill the fields — nothing is saved until you hit Save.');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+let _tagResults = [];
+
+async function tagApplyResult(i) {
+  const x = _tagResults[i];
+  if (!x) return;
+  for (const f of _tagFields) {
+    if (!x[f]) continue;
+    const input = document.getElementById('tagf_' + f);
+    if (input) { input.value = x[f]; tagUncheckClear(f); }
+  }
+  document.getElementById('tagResults').style.display = 'none';
+  if (x.cover && !document.getElementById('tagCoverPick').disabled) {
+    tagMsg('Fields filled. Fetching the cover…');
+    const c = await api('fetch_cover', x.cover);
+    if (c.ok) {
+      _tagCoverPath = c.path;
+      _tagRemoveCover = false;
+      document.getElementById('tagCoverNote').textContent = 'New cover from the lookup.';
+      tagMsg('Fields and cover filled in — check them, then Save.');
+      return;
+    }
+  }
+  tagMsg('Fields filled in — check them, then Save.');
+}
+
+async function tagSave() {
+  if (!_tagPath) return;
+  const values = {}, clear = [];
+  for (const f of _tagFields) {
+    if (document.getElementById('tagc_' + f).checked) clear.push(f);
+    else values[f] = document.getElementById('tagf_' + f).value;
+  }
+
+  const btn = document.getElementById('tagSaveBtn');
+  btn.disabled = true;
+  tagMsg('Saving…');
+  // Let go of the file first: while the preview holds it open through the
+  // media server, Windows refuses to replace it. The backend drops its end
+  // too — see save_tags.
+  histUnloadKeepSelection();
+  try {
+    const r = await api('save_tags', _tagPath, values, clear,
+                        _tagCoverPath, _tagRemoveCover);
+    if (!r.ok) { tagMsg(r.msg || "Couldn't save those tags.", '#aa0000'); return; }
+    tagMsg(r.msg, '#006600');
+    const path = _tagPath;
+    setTimeout(() => {
+      tagClose();
+      // Re-select so the panel and thumbnail show the new values. The
+      // thumbnail cache keys on mtime and size, so new art invalidates itself.
+      const i = _histEntries.findIndex(e => e.path === path);
+      if (i >= 0) histSelect(i);
+    }, 700);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// Release the media element without dropping the row selection — the modal is
+// still open and still needs to know which file it is editing.
+function histUnloadKeepSelection() {
+  const v = document.getElementById('histVideo');
+  if (v) { try { v.pause(); } catch (_) {} v.removeAttribute('src'); v.load(); }
 }
 
 // ── Contact sheet ─────────────────────────────────────────────────────────────

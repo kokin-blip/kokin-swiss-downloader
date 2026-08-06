@@ -245,6 +245,28 @@ class MediaServer:
     def lookup(self, ident: str):
         return self._ids.get(ident)
 
+    def forget(self, path) -> bool:
+        """
+        Drop a file from the registry so nothing can re-open it through us.
+
+        Needed before rewriting a file the preview may have been playing. The
+        page releasing a <video> src is not enough on its own: a request
+        already in flight would still resolve its id and hold a handle open,
+        and Windows then refuses to replace the file. Forgetting the id first
+        makes any straggler 404 instead.
+
+        Returns True if the path was registered.
+        """
+        try:
+            key = str(Path(path).resolve())
+        except OSError:
+            key = str(path)
+        with self._lock:
+            ident = self._by_path.pop(key, None)
+            if ident is not None:
+                self._ids.pop(ident, None)
+        return ident is not None
+
     def url_for(self, path) -> str:
         """
         Register a file and return the URL that serves it. "" if unusable.

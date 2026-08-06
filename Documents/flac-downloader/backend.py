@@ -25,13 +25,14 @@ import convert
 import history
 import mediaops
 import preview
+import tags
 from mediaserver import MediaServer
 from providers import (OdesliResolver, QobuzAPI, SpotiflacProxy,
                        MusicBrainz, is_drm_error, friendly_dl_error,
                        extract_qobuz_id, fetch_spotify_metadata,
                        lookup_album_cover, fetch_spotify_album_tracks,
                        is_album_or_playlist_url, clean_url)
-from utils import (find_ffmpeg, tag_flac_file, flac_cover_info,
+from utils import (app_data_dir, find_ffmpeg, tag_flac_file, flac_cover_info,
                    debug_log, debug_enabled, set_debug, debug_log_path,
                    redact_url, notify_done)
 from version import __version__, GITHUB_OWNER, GITHUB_REPO
@@ -1139,6 +1140,123 @@ class API:
 
     def clear_thumb_cache(self) -> dict:
         return {"ok": True, "removed": preview.clear_cache()}
+
+    # ── Tag editor ───────────────────────────────────────────────────────────
+    #
+    # The only feature that modifies files the user already owns rather than
+    # producing new ones, which is why tags.py copies, tags the copy, and only
+    # then replaces the original.
+
+    def read_tags(self, path: str) -> dict:
+        r = tags.read_tags(path)
+        r["fields"] = list(tags.FIELDS)
+        r["labels"] = dict(tags.LABELS)
+        return r
+
+    def save_tags(self, path: str, values: dict = None, clear=None,
+                  cover_path: str = "", remove_cover: bool = False) -> dict:
+        """
+        Write tag changes, having first let go of the file.
+
+        The preview holds the file open through the media server, and Windows
+        will not let us replace a file with a live handle on it. The page drops
+        the <video> src before calling this; forgetting the id here closes the
+        other half, so a request already in flight 404s rather than re-opening
+        the file underneath us.
+        """
+        p = Path(path or "")
+        self._media.forget(p)
+        r = tags.write_tags(p, values or {}, clear or [], cover_path,
+                            bool(remove_cover))
+        if r["ok"]:
+            self._log(f"{p.name}: {r['msg']}", "bright")
+            # The thumbnail cache keys on mtime and size, so new artwork
+            # invalidates itself — nothing to clear here.
+            self._emit("history", entries=self._history_entries(50))
+        return r
+
+    def pick_cover(self) -> dict:
+        """Choose an image for cover art. Returns a path — never bytes."""
+        if not self._window:
+            return {"ok": False, "msg": "No window."}
+        try:
+            import webview
+            sel = self._window.create_file_dialog(
+                webview.OPEN_DIALOG, allow_multiple=False,
+                file_types=("Images (*.jpg;*.jpeg;*.png;*.webp;*.bmp)",))
+        except Exception as e:
+            return {"ok": False, "msg": str(e)}
+        if not sel:
+            return {"ok": False, "msg": ""}      # cancelled is not an error
+        path = sel[0] if isinstance(sel, (list, tuple)) else sel
+        return {"ok": True, "path": str(path), "name": Path(path).name}
+
+    def fetch_tags(self, query: str) -> dict:
+        """
+        Look up track metadata to fill the editor from.
+
+        Returns candidates for the user to choose between — never auto-applies.
+        A search is a guess, and silently overwriting somebody's tags with a
+        guess is how a library gets quietly wrecked.
+        """
+        query = (query or "").strip()
+        if not query:
+            return {"ok": False, "msg": "Type something to search for.",
+                    "results": []}
+        s = cfg.load()
+        proxy = s.get("proxy") or None
+        try:
+            items = QobuzAPI().search_track_anon(query, limit=5, proxy=proxy)
+        except Exception as e:
+            return {"ok": False, "msg": f"Search failed: {e}", "results": []}
+
+        results = []
+        for it in items or []:
+            album = it.get("album") or {}
+            artist = ((it.get("performer") or {}).get("name")
+                      or (album.get("artist") or {}).get("name") or "")
+            released = str(album.get("release_date_original") or "")
+            results.append({
+                "title":       it.get("title") or "",
+                "artist":      artist,
+                "album":       album.get("title") or "",
+                "albumartist": (album.get("artist") or {}).get("name") or "",
+                "date":        released[:4],
+                "genre":       (album.get("genre") or {}).get("name") or "",
+                "tracknumber": str(it.get("track_number") or ""),
+                "discnumber":  str(it.get("media_number") or ""),
+                "cover":       ((album.get("image") or {}).get("large") or ""),
+                "label":       f"{artist} — {it.get('title') or ''}"
+                               f"{' · ' + album.get('title') if album.get('title') else ''}"
+                               f"{' · ' + released[:4] if released else ''}",
+            })
+        if not results:
+            return {"ok": False, "msg": "Nothing found for that.", "results": []}
+        return {"ok": True, "msg": f"{len(results)} matches", "results": results}
+
+    def fetch_cover(self, url: str) -> dict:
+        """
+        Download a chosen cover to a temp file and hand back the path.
+
+        Same rule as pick_cover: artwork never crosses the JS bridge as bytes.
+        """
+        url = (url or "").strip()
+        if not url.startswith(("http://", "https://")):
+            return {"ok": False, "msg": "That isn't a usable image link."}
+        try:
+            import urllib.request
+            req = urllib.request.Request(url, headers={"User-Agent": _BROWSER_UA})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                data = r.read(12 * 1024 * 1024)
+            if not data:
+                return {"ok": False, "msg": "That image was empty."}
+            d = app_data_dir() / "tmp"
+            d.mkdir(parents=True, exist_ok=True)
+            dst = d / "cover-fetch.jpg"
+            dst.write_bytes(data)
+            return {"ok": True, "path": str(dst), "name": dst.name}
+        except Exception as e:
+            return {"ok": False, "msg": f"Couldn't fetch that cover: {e}"}
 
     # ── Media operations (clip, and later: sheet / fit / normalise) ───────────
     #

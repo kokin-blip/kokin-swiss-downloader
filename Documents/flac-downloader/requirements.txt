@@ -6,3 +6,7 @@ playwright>=1.40
 # utils.py treats it as optional (magic-byte fallback), but convert.py needs it
 # for real: ffmpeg has no ICO muxer and mangles animated GIF/WebP.
 Pillow>=10.0
+# Tag reading and writing (tags.py, utils.tag_flac_file). It arrives
+# transitively via yt-dlp, but the tag editor makes it load-bearing, and a
+# dependency this app depends on directly should say so itself.
+mutagen>=1.45
