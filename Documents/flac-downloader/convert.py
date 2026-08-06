@@ -823,6 +823,30 @@ def pillow_available() -> bool:
         return False
 
 
+def probe_image(path) -> dict:
+    """
+    Dimensions and frame count for a still or animated image, via Pillow.
+
+    ffmpeg is the wrong tool for this. Its webp demuxer skips the ANIM chunk
+    outright — an animated WebP comes back as "unspecified size" with no width
+    at all — and it reports every still as a 25 fps video. Pillow reads the
+    header of everything the Convert tab already accepts, so the History Info
+    panel can show a resolution for images ffmpeg simply shrugs at.
+
+    Returns {} when Pillow is missing or the file can't be read; callers fall
+    back to probe_full().
+    """
+    try:
+        from PIL import Image
+        with Image.open(str(path)) as im:
+            frames = getattr(im, "n_frames", 1)
+            return {"width": im.width, "height": im.height,
+                    "format": (im.format or "").lower(),
+                    "frames": frames, "animated": frames > 1}
+    except Exception:
+        return {}
+
+
 def convert_image(src, dst, target: str, quality, opts: dict) -> str:
     """
     Convert one image. Returns a note to log ('' when there's nothing to say).

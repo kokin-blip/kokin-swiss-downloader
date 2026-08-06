@@ -2338,25 +2338,30 @@ function fmtChannels(n) {
 }
 
 function renderHistInfo(info) {
-  // ffmpeg has no concept of a still: it reports a JPEG as a 25 fps mjpeg
-  // video in a "jpeg_pipe" container. Those three fields are true and
-  // useless, so a still shows only what a picture actually has. An *animated*
-  // GIF or WebP is a different matter — it has a real duration and a real
-  // frame rate — so the test is the duration, not the file being an image.
-  const still = info.kind === 'image' && !info.duration;
+  // ffmpeg has no concept of a picture: it calls every JPEG a 25 fps mjpeg
+  // "video" in a jpeg_pipe container, and it reports that same fictitious 25
+  // fps for an animated WebP whose timing it could not read at all. So for
+  // images the codec row is dropped (Format already says "jpeg"), and a frame
+  // rate is shown only when a real duration proves ffmpeg actually timed it.
+  const img = info.kind === 'image';
+  const timed = info.duration > 0;
 
-  // Every other field is best-effort — probe_full degrades to 0/'' rather
-  // than failing — so a row we have no value for is simply left out. Printing
+  // Every field is best-effort — probe_full degrades to 0/'' rather than
+  // failing — so a row we have no value for is simply left out. Printing
   // "0 kbps" or "unknown" for a dozen rows would be worse than a short list.
   const rows = [
     ['File',       info.name],
     ['Size',       fmtBytes(info.size)],
-    ['Length',     info.duration ? fmtClock(info.duration, false) : ''],
-    ['Format',     still ? '' : info.format],
+    ['Length',     timed ? fmtClock(info.duration, false) : ''],
+    // ffmpeg names its image demuxers "jpeg_pipe", "png_pipe" — an internal
+    // detail, not a format anyone recognises. Pillow's name wins when we have
+    // it; this tidies the fallback.
+    ['Format',     String(info.format || '').replace(/_pipe$/, '')],
     ['Bitrate',    fmtBitrate(info.bitrate)],
-    ['Video',      still ? '' : [info.vcodec, info.vprofile && `(${info.vprofile})`].filter(Boolean).join(' ')],
+    ['Video',      img ? '' : [info.vcodec, info.vprofile && `(${info.vprofile})`].filter(Boolean).join(' ')],
     ['Size (px)',  info.width && info.height ? `${info.width} × ${info.height}` : ''],
-    ['Frame rate', (still || !info.fps) ? '' : info.fps + ' fps'],
+    ['Frames',     info.frames > 1 ? `${info.frames} (animated)` : ''],
+    ['Frame rate', (info.fps && (timed || !img)) ? info.fps + ' fps' : ''],
     ['Colour',     info.pix_fmt],
     ['Audio',      [info.acodec, info.aprofile && `(${info.aprofile})`].filter(Boolean).join(' ')],
     ['Sample rate', info.sample_rate ? (info.sample_rate / 1000).toFixed(1) + ' kHz' : ''],

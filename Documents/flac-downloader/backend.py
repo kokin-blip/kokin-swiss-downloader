@@ -973,6 +973,15 @@ class API:
         # still (ffmpeg reports every JPEG as a 25 fps mjpeg "video").
         exe = self._ffmpeg_exe()
         info = convert.probe_full(exe, p) if exe else {}
+        if kind == "image":
+            # Pillow overrides ffmpeg here: ffmpeg cannot read an animated
+            # WebP's size at all, and Pillow knows the frame count, which is
+            # what makes "animated" showable.
+            pil = convert.probe_image(p)
+            if pil.get("width"):
+                info.update(width=pil["width"], height=pil["height"],
+                            frames=pil["frames"], animated=pil["animated"])
+                info["format"] = pil["format"] or info.get("format", "")
         return {
             "ok":     True,
             "url":    url,
@@ -989,7 +998,8 @@ class API:
                 ("has_cover", False), ("vcodec", ""), ("vprofile", ""),
                 ("width", 0), ("height", 0), ("fps", 0.0), ("vbitrate", 0),
                 ("pix_fmt", ""), ("acodec", ""), ("aprofile", ""),
-                ("sample_rate", 0), ("channels", 0), ("abitrate", 0))},
+                ("sample_rate", 0), ("channels", 0), ("abitrate", 0),
+                ("frames", 0), ("animated", False))},
         }
 
     def thumb_for(self, path: str) -> dict:
