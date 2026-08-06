@@ -968,11 +968,11 @@ class API:
         if not url:
             return {"ok": False, "msg": "Couldn't start the preview server."}
 
-        info = {}
-        if kind in ("audio", "video"):
-            exe = self._ffmpeg_exe()
-            if exe:
-                info = convert.probe_full(exe, p)
+        # Images are probed too — dimensions are the thing you actually want to
+        # know about a picture. The UI drops the fields that mean nothing for a
+        # still (ffmpeg reports every JPEG as a 25 fps mjpeg "video").
+        exe = self._ffmpeg_exe()
+        info = convert.probe_full(exe, p) if exe else {}
         return {
             "ok":     True,
             "url":    url,

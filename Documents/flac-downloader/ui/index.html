@@ -2338,18 +2338,25 @@ function fmtChannels(n) {
 }
 
 function renderHistInfo(info) {
-  // Every field is best-effort — probe_full degrades to 0/'' rather than
-  // failing — so a row we have no value for is simply left out. Printing
+  // ffmpeg has no concept of a still: it reports a JPEG as a 25 fps mjpeg
+  // video in a "jpeg_pipe" container. Those three fields are true and
+  // useless, so a still shows only what a picture actually has. An *animated*
+  // GIF or WebP is a different matter — it has a real duration and a real
+  // frame rate — so the test is the duration, not the file being an image.
+  const still = info.kind === 'image' && !info.duration;
+
+  // Every other field is best-effort — probe_full degrades to 0/'' rather
+  // than failing — so a row we have no value for is simply left out. Printing
   // "0 kbps" or "unknown" for a dozen rows would be worse than a short list.
   const rows = [
     ['File',       info.name],
     ['Size',       fmtBytes(info.size)],
     ['Length',     info.duration ? fmtClock(info.duration, false) : ''],
-    ['Format',     info.format],
+    ['Format',     still ? '' : info.format],
     ['Bitrate',    fmtBitrate(info.bitrate)],
-    ['Video',      [info.vcodec, info.vprofile && `(${info.vprofile})`].filter(Boolean).join(' ')],
+    ['Video',      still ? '' : [info.vcodec, info.vprofile && `(${info.vprofile})`].filter(Boolean).join(' ')],
     ['Size (px)',  info.width && info.height ? `${info.width} × ${info.height}` : ''],
-    ['Frame rate', info.fps ? info.fps + ' fps' : ''],
+    ['Frame rate', (still || !info.fps) ? '' : info.fps + ' fps'],
     ['Colour',     info.pix_fmt],
     ['Audio',      [info.acodec, info.aprofile && `(${info.aprofile})`].filter(Boolean).join(' ')],
     ['Sample rate', info.sample_rate ? (info.sample_rate / 1000).toFixed(1) + ' kHz' : ''],
