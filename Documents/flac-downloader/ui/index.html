@@ -20,8 +20,17 @@
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* Fill the window, whatever size it actually is — never assume one.
+   This used to hardcode 700x820 to match app.py's create_window(), but the
+   window we really get is 684x781: pywebview subtracts the metrics of a
+   standard title bar and frame even though frameless=True means there is
+   none. The document was therefore 16px wider and 39px taller than the
+   viewport, and `overflow: hidden` cropped the difference — which is why the
+   status bar was never visible and the close button sat half off-screen.
+   Sizing to the viewport instead makes the layout correct at any window size,
+   which is also what lets the window be resized and maximised at all. */
 html, body {
-  width: 700px; height: 820px;
+  width: 100%; height: 100%;
   overflow: hidden;
   background: var(--win-teal);
   font-family: var(--font);
@@ -53,7 +62,7 @@ html, body {
 
 /* ── Main window ──────────────────────────────────────────────────────────── */
 .window {
-  width: 700px; height: 820px;
+  width: 100%; height: 100%;
   background: var(--win-gray);
   display: flex;
   flex-direction: column;
@@ -612,6 +621,90 @@ hr.separator {
 .conv-adv-row label { flex: 0 0 92px; font-size: 10px; color: var(--win-dark); }
 .conv-adv-row input.form-control, .conv-adv-row select.form-control { width: 72px; }
 
+/* ── History tab ──────────────────────────────────────────────────────────── */
+/* The pane owns the whole window body here (the shared log/progress area is
+   hidden on this tab), so the list flexes and the preview below it is fixed. */
+#pane-history { gap: 4px; }
+.hist-toolbar { display: flex; gap: 4px; align-items: center; flex-shrink: 0; }
+.hist-toolbar .form-control { flex: 1 1 auto; }
+
+.hist-list {
+  flex: 1 1 auto; min-height: 60px; overflow-y: auto;
+  background: var(--win-light); padding: 1px;
+  box-shadow:
+    inset  1px  1px 0 var(--win-darker), inset -1px -1px 0 var(--win-light),
+    inset  2px  2px 0 var(--win-dark),   inset -2px -2px 0 var(--win-lighter);
+}
+.hist-item {
+  display: flex; align-items: center; gap: 6px;
+  padding: 2px 3px; cursor: pointer;
+}
+.hist-item + .hist-item { border-top: 1px dotted var(--win-lighter); }
+.hist-item:hover    { background: var(--win-lighter); }
+.hist-item.selected { background: var(--win-blue); color: var(--win-light); }
+.hist-item.selected .hist-sub,
+.hist-item.selected .hist-time { color: var(--win-lighter); }
+
+/* Fixed box so rows don't reflow as thumbnails arrive one by one. 16:9 at a
+   size where a face is still recognisable. */
+.hist-thumb {
+  flex: 0 0 auto; width: 48px; height: 27px;
+  background: #000; overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--win-dark); font-size: 13px;
+}
+.hist-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.hist-main  { flex: 1 1 auto; overflow: hidden; }
+.hist-name  { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hist-sub   { font-size: 10px; color: var(--win-dark);
+              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hist-time  { flex: 0 0 auto; font-size: 10px; color: var(--win-dark); }
+.hist-acts  { flex: 0 0 auto; display: flex; gap: 1px; }
+.hist-act   { cursor: pointer; padding: 0 3px; font-size: 12px; }
+.hist-act:hover { color: #cc0000; }
+
+/* ── History preview / player ─────────────────────────────────────────────── */
+.hist-preview {
+  flex: 0 0 auto; padding: 4px;
+  background: var(--win-gray);
+  box-shadow: inset 1px 1px 0 var(--win-darker), inset -1px -1px 0 var(--win-light);
+}
+/* Grows with the window so maximising actually buys a bigger picture, but
+   never shrinks below the height the 700x820 default was drawn around. */
+.hist-stage {
+  height: clamp(168px, 30vh, 460px); background: #000;
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden; position: relative;
+}
+.hist-stage video, .hist-stage img { max-width: 100%; max-height: 100%; display: block; }
+.hist-stage audio { width: 92%; }
+.hist-stage-msg { color: var(--win-dark); font-size: 10px; padding: 0 12px;
+                  text-align: center; line-height: 1.6; }
+.hist-ctl { display: flex; gap: 4px; align-items: center; margin-top: 4px; }
+.hist-ctl .btn { padding: 2px 6px; }
+.hist-clock {
+  font-family: 'Courier New', monospace; font-size: 10px;
+  padding: 1px 4px; background: var(--win-light);
+  box-shadow: inset 1px 1px 0 var(--win-dark);
+}
+.hist-extract {
+  display: flex; gap: 4px; align-items: center; margin-top: 4px;
+  padding-top: 4px; border-top: 1px solid var(--win-dark);
+}
+.hist-extract select.form-control { width: auto; }
+.hist-extract input.form-control  { width: 52px; }
+.hist-xbar {
+  flex: 1 1 auto; height: 12px; background: var(--win-light);
+  box-shadow: inset 1px 1px 0 var(--win-dark);
+  position: relative; overflow: hidden;
+}
+.hist-xfill { height: 100%; width: 0; background: var(--win-blue);
+              transition: width .15s linear; }
+.hist-xlabel {
+  position: absolute; inset: 0; text-align: center; font-size: 9px;
+  line-height: 12px; mix-blend-mode: difference; color: #fff;
+}
+
 /* ── Misc ─────────────────────────────────────────────────────────────────── */
 .flex-row { display: flex; gap: 6px; align-items: center; }
 .spacer   { flex: 1; }
@@ -754,7 +847,7 @@ hr.separator {
 <div class="window" id="mainWindow">
 
   <!-- Title Bar -->
-  <div class="title-bar" id="titleBar">
+  <div class="title-bar" id="titleBar" ondblclick="toggleMaximize()">
     <svg class="swiss-icon title-bar-icon" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
       <rect width="16" height="16" fill="#d00"/>
       <rect x="6" y="2" width="4" height="12" fill="#fff"/>
@@ -763,6 +856,7 @@ hr.separator {
     <div class="title-bar-text">Kokin's Swiss Downloader</div>
     <div class="title-bar-controls">
       <button onclick="api('minimize_window')" title="Minimize">─</button>
+      <button onclick="toggleMaximize()" id="btnMaximize" title="Maximize">□</button>
       <button onclick="api('close_window')"   title="Close">✕</button>
     </div>
   </div>
@@ -772,6 +866,7 @@ hr.separator {
     <button class="tab-btn active" id="tab-audio"    onclick="switchTab('audio')">Audio</button>
     <button class="tab-btn"        id="tab-video"    onclick="switchTab('video')">Video</button>
     <button class="tab-btn"        id="tab-convert"  onclick="switchTab('convert')">Convert</button>
+    <button class="tab-btn"        id="tab-history"  onclick="switchTab('history')">History</button>
     <button class="tab-btn"        id="tab-settings" onclick="switchTab('settings')">Settings</button>
   </div>
   <div class="tab-border"></div>
@@ -1125,6 +1220,76 @@ hr.separator {
       </div>
     </div><!-- /pane-convert -->
 
+    <!-- ── HISTORY TAB ───────────────────────────────────────────────────── -->
+    <div class="tab-pane full-height" id="pane-history">
+
+      <div class="hist-toolbar">
+        <input type="text" class="form-control" id="histSearch" spellcheck="false"
+               placeholder="Search downloads…" oninput="renderHistoryTab()">
+        <select class="form-control" id="histFilter" style="width:96px"
+                onchange="renderHistoryTab()">
+          <option value="">Everything</option>
+          <option value="video">Video</option>
+          <option value="audio">Audio</option>
+          <option value="image">Images</option>
+          <option value="failed">Failed</option>
+        </select>
+        <button class="btn" onclick="refreshHistory()" title="Re-read from disk">↻</button>
+        <button class="btn" onclick="clearHistory()">Clear</button>
+      </div>
+
+      <div class="hist-list" id="histList">
+        <div class="queue-empty">No downloads yet.</div>
+      </div>
+
+      <div class="hist-preview">
+        <div class="hist-stage" id="histStage">
+          <div class="hist-stage-msg" id="histStageMsg">
+            Pick something above to preview it.
+          </div>
+        </div>
+
+        <!-- Playback + single-frame capture. Video only; hidden otherwise. -->
+        <div class="hist-ctl" id="histCtl" style="display:none">
+          <button class="btn" onclick="histStep(-1)" title="Back one frame">◀|</button>
+          <button class="btn" onclick="histStep(1)"  title="Forward one frame">|▶</button>
+          <span class="hist-clock" id="histClock">0:00.00 / 0:00</span>
+          <span class="spacer"></span>
+          <select class="form-control" id="histFrameFmt" style="width:58px">
+            <option value="png">PNG</option>
+            <option value="jpg">JPEG</option>
+          </select>
+          <button class="btn" onclick="histSaveFrame()" id="histSaveBtn"
+                  title="Write the frame shown above to disk, at full resolution">Save this frame</button>
+        </div>
+
+        <!-- Bulk extraction. -->
+        <div class="hist-extract" id="histExtract" style="display:none">
+          <select class="form-control" id="histXMode" onchange="onHistModeChange()">
+            <option value="every">Every</option>
+            <option value="count">Total</option>
+            <option value="scene">On cuts</option>
+          </select>
+          <input type="text" class="form-control" id="histXValue" value="1"
+                 oninput="histPlan()">
+          <span class="label-sm" id="histXUnit" style="width:66px">seconds</span>
+          <select class="form-control" id="histXFmt" style="width:58px">
+            <option value="png">PNG</option>
+            <option value="jpg">JPEG</option>
+          </select>
+          <button class="btn" id="histXBtn" onclick="histExtract()">Extract frames</button>
+          <div class="hist-xbar" id="histXBar" style="display:none">
+            <div class="hist-xfill" id="histXFill"></div>
+            <div class="hist-xlabel" id="histXLabel"></div>
+          </div>
+          <button class="btn" id="histXStop" onclick="abortDownload()"
+                  style="display:none">Stop</button>
+        </div>
+        <div class="label-sm mt4" id="histXHint">&nbsp;</div>
+      </div>
+
+    </div><!-- /pane-history -->
+
     <!-- ── SETTINGS TAB ──────────────────────────────────────────────────── -->
     <div class="tab-pane full-height" id="pane-settings">
       <div class="settings-scroll">
@@ -1312,20 +1477,16 @@ hr.separator {
         <div class="provider-item"><div class="provider-dot idle" id="dot-musicbrainz"></div><span>MusicBrainz</span></div>
       </div>
 
-      <!-- Queue / History -->
+      <!-- Queue. History used to share this box as a second sub-tab; it now
+           has a whole tab of its own, with previews this 6-row strip had no
+           space for. -->
       <div class="queue-head">
-        <span>
-          <span class="qh-tab active" id="qhTabQueue" onclick="showQueuePanel('queue')">Queue: <span id="queueCount">empty</span></span>
-          <span class="qh-tab" id="qhTabHist" onclick="showQueuePanel('history')">History</span>
-        </span>
-        <span class="queue-x" id="queuePanelAction" onclick="queuePanelAction()"
+        <span class="qh-tab active">Queue: <span id="queueCount">empty</span></span>
+        <span class="queue-x" onclick="clearFinished()"
               title="Remove finished items">clear finished</span>
       </div>
       <div class="queue-wrap" id="queueWrap">
         <div class="queue-empty">Nothing queued.</div>
-      </div>
-      <div class="queue-wrap" id="historyWrap" style="display:none">
-        <div class="queue-empty">No downloads yet.</div>
       </div>
 
       <!-- Log -->
@@ -1360,17 +1521,38 @@ function api(method, ...args) {
   return window.pywebview.api[method](...args);
 }
 
+// ── Window controls ───────────────────────────────────────────────────────────
+async function toggleMaximize() {
+  const r = await api('toggle_maximize');
+  if (!r || !r.ok) return;
+  // ❐ is the Win95 "restore down" glyph — the overlapping-panes box.
+  const btn = document.getElementById('btnMaximize');
+  btn.textContent = r.maximized ? '❐' : '□';
+  btn.title       = r.maximized ? 'Restore' : 'Maximize';
+}
+
 // ── Tab switching ─────────────────────────────────────────────────────────────
 function switchTab(name) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
   document.getElementById('tab-' + name).classList.add('active');
   document.getElementById('pane-' + name).classList.add('active');
-  // Output (log/progress/provider) is shared by every tab that runs jobs,
-  // hidden on settings
+  // Output (log/progress/provider) is shared by every tab that runs jobs, and
+  // hidden on Settings and History. History needs the whole window body for
+  // the list plus the player, so frame extraction reports progress on its own
+  // inline bar instead of the shared one.
   const out = document.getElementById('outputArea');
   if (name === 'audio' || name === 'video' || name === 'convert') out.classList.add('active');
   else                                                            out.classList.remove('active');
+
+  if (name === 'history') refreshHistory();
+  else histPausePreview();
+}
+
+// Leaving the tab shouldn't leave audio playing from a panel nobody can see.
+function histPausePreview() {
+  const v = document.getElementById('histVideo');
+  if (v) { try { v.pause(); } catch (_) {} }
 }
 
 // ── Audio format / quality ────────────────────────────────────────────────────
@@ -1818,22 +2000,19 @@ function pickResult(kind, url) {
           .style.display = 'none';
 }
 
-// ── History ───────────────────────────────────────────────────────────────────
-let _qhPanel = 'queue';
+// ── History tab ───────────────────────────────────────────────────────────────
+let _histEntries = [];    // newest-first, straight from the backend
+let _histObs     = null;  // IntersectionObserver driving lazy thumbnails
+// The selection is held as a PATH, not an index. A download finishing while
+// this tab is open prepends a row and shifts every index down by one, so an
+// index would silently start pointing at the neighbouring file — and the next
+// "Save this frame" would write from the wrong video.
+let _histSelPath = null;
 
-function showQueuePanel(which) {
-  _qhPanel = which;
-  document.getElementById('queueWrap').style.display   = which === 'queue' ? '' : 'none';
-  document.getElementById('historyWrap').style.display = which === 'queue' ? 'none' : '';
-  document.getElementById('qhTabQueue').classList.toggle('active', which === 'queue');
-  document.getElementById('qhTabHist').classList.toggle('active', which !== 'queue');
-  const act = document.getElementById('queuePanelAction');
-  act.textContent = which === 'queue' ? 'clear finished' : 'clear history';
-  if (which !== 'queue') refreshHistory();
-}
-
-function queuePanelAction() {
-  if (_qhPanel === 'queue') clearFinished(); else clearHistory();
+function histCurrent() {
+  return _histSelPath
+    ? _histEntries.find(e => e.path === _histSelPath) || null
+    : null;
 }
 
 function whenLabel(ts) {
@@ -1844,34 +2023,322 @@ function whenLabel(ts) {
     : d.toLocaleDateString([], {month: 'short', day: 'numeric'});
 }
 
-function renderHistory(entries) {
-  const box = document.getElementById('historyWrap');
-  if (!entries || !entries.length) {
-    box.innerHTML = '<div class="queue-empty">No downloads yet.</div>';
-    return;
-  }
-  box.innerHTML = entries.map(e => {
-    const ok   = e.status === 'done';
-    const mark = ok ? '✓' : (e.status === 'cancelled' ? '—' : '✗');
-    // Only offer "open folder" when the file is actually still there —
-    // a dead button that silently does nothing is worse than no button.
-    const act = (ok && e.exists)
-      ? `<span class="queue-x" title="Show in folder" onclick="revealFile(${JSON.stringify(e.path).replace(/"/g,'&quot;')})">📂</span>`
-      : `<span class="queue-x" title="Download again" onclick="redownload(${JSON.stringify(e.url).replace(/"/g,'&quot;')},'${e.kind}')">↻</span>`;
-    return '<div class="queue-row">' +
-      `<span class="queue-badge ${ok ? 'hist-ok' : 'hist-bad'}">${mark}</span>` +
-      `<span class="hist-when">${whenLabel(e.ts)}</span>` +
-      `<span class="queue-url" title="${escapeAttr(e.url)}">` +
-        escapeHtml(e.title || e.url) +
-      '</span>' + act + '</div>';
-  }).join('');
+function fmtBytes(n) {
+  if (!n) return '';
+  const u = ['B', 'KB', 'MB', 'GB'];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i === 0 ? n : n.toFixed(n < 10 ? 1 : 0)) + ' ' + u[i];
 }
 
-async function refreshHistory() { renderHistory(await api('get_history')); }
+function fmtClock(s, withCentis) {
+  if (!isFinite(s) || s < 0) s = 0;
+  const m = Math.floor(s / 60);
+  const sec = s - m * 60;
+  return withCentis
+    ? `${m}:${sec.toFixed(2).padStart(5, '0')}`
+    : `${m}:${String(Math.floor(sec)).padStart(2, '0')}`;
+}
+
+function renderHistory(entries) {
+  _histEntries = entries || [];
+  renderHistoryTab();
+}
+
+function renderHistoryTab() {
+  const box = document.getElementById('histList');
+  if (!box) return;
+  const q    = (document.getElementById('histSearch').value || '').toLowerCase();
+  const filt = document.getElementById('histFilter').value;
+
+  const rows = _histEntries.filter(e => {
+    if (filt === 'failed') { if (e.status === 'done') return false; }
+    else if (filt && e.media !== filt) return false;
+    if (!q) return true;
+    return ((e.title || '') + ' ' + (e.url || '')).toLowerCase().includes(q);
+  });
+
+  if (!rows.length) {
+    box.innerHTML = `<div class="queue-empty">${
+      _histEntries.length ? 'Nothing matches that.' : 'No downloads yet.'}</div>`;
+    return;
+  }
+
+  // The index in _histEntries — not in the filtered list — is what the click
+  // handlers carry, so filtering while something is selected can't act on the
+  // wrong row.
+  box.innerHTML = rows.map(e => {
+    const i    = _histEntries.indexOf(e);
+    const ok   = e.status === 'done';
+    const mark = ok ? '✓' : (e.status === 'cancelled' ? '—' : '✗');
+    const icon = {video: '🎞', audio: '♪', image: '🖼'}[e.media] || '📄';
+    const bits = [];
+    if (e.kind === 'frames') bits.push('frames');
+    else if (e.media)        bits.push(e.media);
+    if (!ok)       bits.push(e.status);
+    if (!e.exists) bits.push('moved or deleted');
+
+    const acts = [];
+    if (e.exists) {
+      acts.push(`<span class="hist-act" title="Show in folder"
+                       onclick="event.stopPropagation();revealFile(${jsArg(e.path)})">📂</span>`);
+    }
+    if (e.kind !== 'convert' && e.kind !== 'frames') {
+      acts.push(`<span class="hist-act" title="Download again"
+                       onclick="event.stopPropagation();redownload(${jsArg(e.url)},'${e.kind}')">↻</span>`);
+    }
+
+    return `<div class="hist-item${_histSelPath === e.path ? ' selected' : ''}"
+                 onclick="histSelect(${i})" title="${escapeAttr(e.path || e.url)}">
+      <div class="hist-thumb" data-idx="${i}">${icon}</div>
+      <div class="hist-main">
+        <div class="hist-name">${escapeHtml(e.title || e.url)}</div>
+        <div class="hist-sub">${escapeHtml(bits.join(' · '))}</div>
+      </div>
+      <span class="hist-time">${whenLabel(e.ts)}</span>
+      <span class="queue-badge ${ok ? 'hist-ok' : 'hist-bad'}">${mark}</span>
+      <span class="hist-acts">${acts.join('')}</span>
+    </div>`;
+  }).join('');
+
+  observeThumbs();
+}
+
+// Thumbnails cost an ffmpeg spawn each on first sight (~1s for a video), so a
+// 100-row history must not generate 100 of them up front. Only rows actually
+// scrolled into view are ever asked for; after that the backend caches them.
+function observeThumbs() {
+  if (_histObs) _histObs.disconnect();
+  _histObs = new IntersectionObserver((entries, obs) => {
+    entries.forEach(en => {
+      if (!en.isIntersecting) return;
+      obs.unobserve(en.target);
+      loadThumb(en.target);
+    });
+  }, {root: document.getElementById('histList'), rootMargin: '80px'});
+  document.querySelectorAll('#histList .hist-thumb[data-idx]')
+          .forEach(el => _histObs.observe(el));
+}
+
+async function loadThumb(el) {
+  const e = _histEntries[+el.dataset.idx];
+  if (!e || !e.exists || !e.media) return;
+  try {
+    const r = await api('thumb_for', e.path);
+    // The list may have re-rendered while ffmpeg was working; the node we hold
+    // would then be detached, and painting it would be invisible but harmless.
+    if (r && r.ok && r.url && el.isConnected) {
+      el.innerHTML = `<img src="${escapeAttr(r.url)}" alt="">`;
+    }
+  } catch (_) { /* a missing thumbnail is never worth an error */ }
+}
+
+async function refreshHistory() {
+  renderHistory(await api('get_history'));
+}
+
 async function clearHistory() {
   const r = await api('clear_history');
   appendLog(`Cleared ${r.removed} history entr${r.removed === 1 ? 'y' : 'ies'}.`, 'warn');
+  histUnload();
   refreshHistory();
+}
+
+// ── History preview player ────────────────────────────────────────────────────
+
+function jsArg(s) {
+  // Values are interpolated into an inline onclick, so they must survive both
+  // the HTML attribute and the JS string. Paths routinely contain quotes and
+  // backslashes; ' escaped naively would break out of the handler.
+  return escapeAttr(JSON.stringify(s == null ? '' : s));
+}
+
+function histStageMsg(text) {
+  document.getElementById('histStage').innerHTML =
+    `<div class="hist-stage-msg">${escapeHtml(text)}</div>`;
+}
+
+function histUnload() {
+  // Releasing the src matters: while a <video> holds the URL open the media
+  // server keeps a socket and a file handle live, and Windows will refuse to
+  // move or delete the file the user is previewing.
+  const v = document.getElementById('histVideo');
+  if (v) { try { v.pause(); } catch (_) {} v.removeAttribute('src'); v.load(); }
+  _histSelPath = null;
+  document.getElementById('histCtl').style.display = 'none';
+  document.getElementById('histExtract').style.display = 'none';
+  document.getElementById('histXHint').innerHTML = '&nbsp;';
+  histStageMsg('Pick something above to preview it.');
+}
+
+async function histSelect(i) {
+  const e = _histEntries[i];
+  if (!e) return;
+  _histSelPath = e.path;
+  renderHistoryTab();
+
+  document.getElementById('histCtl').style.display = 'none';
+  document.getElementById('histExtract').style.display = 'none';
+  document.getElementById('histXHint').innerHTML = '&nbsp;';
+
+  if (!e.exists) { histStageMsg('That file has been moved or deleted.'); return; }
+  if (!e.media)  { histStageMsg(e.kind === 'frames'
+                    ? 'A folder of extracted frames — open it with 📂.'
+                    : 'Nothing to preview here.'); return; }
+
+  histStageMsg('Loading…');
+  const info = await api('media_info', e.path);
+  if (!info.ok) { histStageMsg(info.msg || "Can't preview that."); return; }
+  // Slow probe + fast clicking: only paint if this is still the chosen row.
+  if (_histSelPath !== e.path) return;
+
+  const stage = document.getElementById('histStage');
+  const src   = escapeAttr(info.url);
+
+  if (info.kind === 'image') {
+    stage.innerHTML = `<img src="${src}" alt="">`;
+    return;
+  }
+  if (info.kind === 'audio') {
+    stage.innerHTML = `<audio id="histVideo" src="${src}" controls autoplay></audio>`;
+    return;
+  }
+
+  // Video: crossorigin lets the canvas be read if we ever want a client-side
+  // grab; the media server sends the matching Access-Control-Allow-Origin.
+  stage.innerHTML = `<video id="histVideo" src="${src}" controls autoplay
+                            crossorigin="anonymous"></video>`;
+  const v = document.getElementById('histVideo');
+  v.addEventListener('timeupdate', histTick);
+  v.addEventListener('seeked',     histTick);
+  v.addEventListener('loadedmetadata', histTick);
+  v.addEventListener('error', () => histStageMsg(
+    "This one won't play in the preview window — 📂 opens it in your player."));
+
+  document.getElementById('histCtl').style.display = 'flex';
+  document.getElementById('histExtract').style.display = 'flex';
+  onHistModeChange();
+}
+
+function histTick() {
+  const v = document.getElementById('histVideo');
+  if (!v) return;
+  document.getElementById('histClock').textContent =
+    `${fmtClock(v.currentTime, true)} / ${fmtClock(v.duration || 0, false)}`;
+}
+
+function histStep(dir) {
+  const v = document.getElementById('histVideo');
+  if (!v) return;
+  // Nudging by a frame is only meaningful while paused, and someone reaching
+  // for it is trying to land on an exact frame — so pause for them.
+  v.pause();
+  // 1/30s: without decoding the stream we can't know the real frame rate, and
+  // a step slightly smaller than one frame still lands on the next frame.
+  v.currentTime = Math.max(0, Math.min(v.duration || 0, v.currentTime + dir / 30));
+  histTick();
+}
+
+async function histSaveFrame() {
+  const v = document.getElementById('histVideo');
+  const e = histCurrent();
+  if (!v || !e) return;
+  const btn = document.getElementById('histSaveBtn');
+  btn.disabled = true;
+  try {
+    const r = await api('save_frame', e.path, v.currentTime,
+                        document.getElementById('histFrameFmt').value, '');
+    const hint = document.getElementById('histXHint');
+    hint.textContent = r.ok ? `Saved ${r.name}` : (r.msg || "Couldn't save that frame.");
+    hint.style.color = r.ok ? '#006600' : '#aa0000';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ── Automatic frame extraction ────────────────────────────────────────────────
+
+const HIST_MODES = {
+  every: {unit: 'seconds',   value: '1',   hint: 'One frame every N seconds.'},
+  count: {unit: 'frames',    value: '20',  hint: 'N frames spread evenly across the video.'},
+  scene: {unit: 'threshold', value: '0.4', hint: 'Only where the picture changes — lower catches more cuts.'},
+};
+
+function onHistModeChange() {
+  const m = document.getElementById('histXMode').value;
+  const cfg = HIST_MODES[m];
+  document.getElementById('histXUnit').textContent = cfg.unit;
+  document.getElementById('histXValue').value = cfg.value;
+  const hint = document.getElementById('histXHint');
+  hint.textContent = cfg.hint;
+  hint.style.color = '';
+  histPlan();
+}
+
+// Say up front how many files this will write. Discovering it afterwards, in
+// Explorer, is how someone ends up with 4000 PNGs they have to select and
+// delete by hand.
+async function histPlan() {
+  const e = histCurrent();
+  if (!e) return;
+  const mode = document.getElementById('histXMode').value;
+  const val  = parseFloat(document.getElementById('histXValue').value);
+  if (!isFinite(val) || val <= 0) return;
+  const p = await api('plan_frames', e.path, mode, val);
+  if (p.error || p.estimate == null) return;
+  const hint = document.getElementById('histXHint');
+  hint.textContent = `About ${p.estimate} image${p.estimate === 1 ? '' : 's'}.` +
+    (p.capped ? ' Only the first 2000 will be written.' : '');
+  hint.style.color = p.capped ? '#aa6600' : '';
+}
+
+async function histExtract() {
+  const e = histCurrent();
+  if (!e) return;
+  const mode = document.getElementById('histXMode').value;
+  const val  = parseFloat(document.getElementById('histXValue').value);
+  if (!isFinite(val) || val <= 0) {
+    const hint = document.getElementById('histXHint');
+    hint.textContent = 'Enter a number greater than zero.';
+    hint.style.color = '#aa0000';
+    return;
+  }
+  const r = await api('extract_frames', e.path, mode, val,
+                      document.getElementById('histXFmt').value, 0, '');
+  if (!r.ok) {
+    const hint = document.getElementById('histXHint');
+    hint.textContent = r.msg || "Couldn't start.";
+    hint.style.color = '#aa0000';
+    return;
+  }
+  histExtractBusy(true);
+  startPolling();   // progress and the finish event arrive through the normal feed
+}
+
+function histExtractBusy(on) {
+  document.getElementById('histXBtn').disabled = on;
+  document.getElementById('histXBar').style.display  = on ? '' : 'none';
+  document.getElementById('histXStop').style.display = on ? '' : 'none';
+  if (on) histExtractProgress(0);
+}
+
+function histExtractProgress(pct) {
+  document.getElementById('histXFill').style.width = Math.max(0, Math.min(100, pct)) + '%';
+  document.getElementById('histXLabel').textContent = Math.round(pct) + '%';
+}
+
+function onFramesDone(u) {
+  histExtractBusy(false);
+  const hint = document.getElementById('histXHint');
+  hint.style.color = u.ok ? '#006600' : '#aa0000';
+  hint.textContent = u.msg || '';
+  // A folder full of new files is worth one click to reach, and this tab has
+  // no log to print the path into.
+  if (u.folder) {
+    hint.insertAdjacentHTML('beforeend',
+      ` <span class="hist-act" style="color:var(--win-blue);text-decoration:underline"
+              onclick="revealFile(${jsArg(u.folder)})">open folder</span>`);
+  }
 }
 async function revealFile(path) {
   const r = await api('reveal_file', path);
@@ -1879,10 +2346,13 @@ async function revealFile(path) {
 }
 function redownload(url, kind) {
   // A conversion's history "url" is a label like "12 files → MP3", not a path,
-  // so there is nothing to re-run from — send them to the tab instead.
-  if (kind === 'convert') {
-    switchTab('convert');
-    appendLog('That was a conversion — pick the files again to repeat it.', 'info');
+  // so there is nothing to re-run from — send them to the tab instead. Frame
+  // extractions are labels too ("40 frames ← clip.mp4").
+  if (kind === 'convert' || kind === 'frames') {
+    switchTab(kind === 'frames' ? 'history' : 'convert');
+    appendLog(kind === 'frames'
+      ? 'That was a frame extraction — pick the video again to repeat it.'
+      : 'That was a conversion — pick the files again to repeat it.', 'info');
     return;
   }
   // Drop the URL back into the right tab and let the user hit Download, rather
@@ -2005,7 +2475,10 @@ async function pollUpdates() {
   const updates = await api('poll_updates');
   updates.forEach(u => {
     if      (u.kind === 'log')            appendLog(u.msg, u.level);
-    else if (u.kind === 'progress')       setProgress(u.pct, u.speed||0, u.eta||0, u.done||0, u.total||0);
+    else if (u.kind === 'progress')     { setProgress(u.pct, u.speed||0, u.eta||0, u.done||0, u.total||0);
+                                          // The History tab hides the shared bar, so mirror it there.
+                                          if (document.getElementById('histXBar').style.display !== 'none')
+                                            histExtractProgress(u.pct); }
     else if (u.kind === 'provider')       setProvider(u.key, u.state);
     else if (u.kind === 'update_available') showUpdateBanner(u.version, u.notes, u.url, u.asset_url);
     else if (u.kind === 'update_progress')  onUpdateProgress(u.pct, u.msg);
@@ -2015,7 +2488,8 @@ async function pollUpdates() {
     else if (u.kind === 'album_progress')   setStatus(`Album: track ${u.current} of ${u.total}…`);
     else if (u.kind === 'job_status')       setStatus(u.msg);
     else if (u.kind === 'queue')            renderQueue(u.jobs || []);
-    else if (u.kind === 'history')          { if (_qhPanel === 'history') renderHistory(u.entries || []); }
+    else if (u.kind === 'history')          renderHistory(u.entries || []);
+    else if (u.kind === 'frames_done')      onFramesDone(u);
     else if (u.kind === 'login_state') {
       document.getElementById('btnLogin').disabled = !!u.busy;
       if (u.sites) renderCookies(u.sites);
@@ -2027,6 +2501,9 @@ async function pollUpdates() {
       document.getElementById('btnDownloadVideo').disabled = false;
       document.getElementById('btnConvert').disabled       = false;
       document.getElementById('btnAbort').disabled         = true;
+      // Belt and braces: an extraction that dies without emitting frames_done
+      // would otherwise leave the Extract button disabled forever.
+      histExtractBusy(false);
       setStatus('Ready');
     }
   });

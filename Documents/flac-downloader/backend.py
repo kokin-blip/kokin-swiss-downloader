@@ -23,6 +23,8 @@ import settings as cfg
 import cookies as site_cookies
 import convert
 import history
+import preview
+from mediaserver import MediaServer
 from providers import (OdesliResolver, QobuzAPI, SpotiflacProxy,
                        MusicBrainz, is_drm_error, friendly_dl_error,
                        extract_qobuz_id, fetch_spotify_metadata,
@@ -436,10 +438,15 @@ class API:
         self._logging_in      = False
         self._last_file       = ""      # last path yt-dlp reported writing
         self._skip_history    = False   # set by probe-only jobs (list formats)
-        # Live ffmpeg process for a conversion, so Abort can kill it outright
-        # rather than waiting for the next progress line (a stalled encode
-        # emits none, and the read would block indefinitely).
+        # Live ffmpeg process for a conversion or a frame extraction, so Abort
+        # can kill it outright rather than waiting for the next progress line
+        # (a stalled encode emits none, and the read would block indefinitely).
         self._convert_proc    = None
+        # Serves local files to the webview over loopback. Started lazily on
+        # the first preview — a user who never opens History never binds a port.
+        self._media           = MediaServer()
+        self._extracting      = False
+        self._maximized       = False
         # Synchronous-prompt support: worker thread blocks on _prompt_event until JS replies
         self._prompt_event    = threading.Event()
         self._prompt_response = True
@@ -463,6 +470,29 @@ class API:
 
     def minimize_window(self):
         if self._window: self._window.minimize()
+
+    def toggle_maximize(self) -> dict:
+        """
+        Maximise / restore, for the title bar's □ button.
+
+        The state is tracked here rather than read back from the window: the
+        title bar is our own HTML, so nothing else can change it behind our
+        back, and pywebview's own `state` is not consistently reported across
+        backends.
+        """
+        if not self._window:
+            return {"ok": False, "maximized": False}
+        try:
+            if self._maximized:
+                self._window.restore()
+            else:
+                self._window.maximize()
+            self._maximized = not self._maximized
+        except Exception:
+            # Never let a window-chrome button raise into the UI; the worst
+            # outcome should be a button that appears not to work.
+            return {"ok": False, "maximized": self._maximized}
+        return {"ok": True, "maximized": self._maximized}
 
     def close_window(self):
         if self._window: self._window.destroy()
@@ -851,7 +881,13 @@ class API:
         # Tell the UI whether each file is still where we left it, so a moved
         # or deleted download doesn't offer a dead "open folder" button.
         for e in entries:
-            e["exists"] = bool(e.get("path")) and Path(e["path"]).exists()
+            p = Path(e["path"]) if e.get("path") else None
+            e["exists"] = bool(p) and p.exists()
+            # 'video' | 'audio' | 'image' | '' — decided from the extension, so
+            # the list can be rendered without probing 100 files off disk. A
+            # frame-extraction row's path is a folder, which has no extension
+            # and correctly comes out as ''.
+            e["media"] = preview.kind_of(p) if (p and p.is_file()) else ""
         return entries
 
     def clear_history(self) -> dict:
@@ -881,6 +917,171 @@ class API:
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "msg": str(e)}
+
+    # ── Preview / frames ─────────────────────────────────────────────────────
+
+    def media_info(self, path: str) -> dict:
+        """
+        Everything the History tab needs to preview one file.
+
+        `url` points at the loopback media server rather than the file itself.
+        The page is served over http (pywebview's own bottle server), and an
+        http page may not load file: subresources — an inline
+        <video src="file://..."> is rejected outright. See mediaserver.py.
+        """
+        p = Path(path or "")
+        if not path or not p.is_file():
+            return {"ok": False, "msg": "That file is no longer there."}
+
+        kind = preview.kind_of(p)
+        if not kind:
+            return {"ok": False, "msg": "That isn't a media file."}
+
+        url = self._media.url_for(p)
+        if not url:
+            return {"ok": False, "msg": "Couldn't start the preview server."}
+
+        info = {}
+        if kind in ("audio", "video"):
+            exe = self._ffmpeg_exe()
+            if exe:
+                info = convert.probe(exe, p)
+        return {
+            "ok":       True,
+            "url":      url,
+            "kind":     kind,
+            "name":     p.name,
+            "duration": info.get("duration", 0.0),
+            "vcodec":   info.get("vcodec", ""),
+            "acodec":   info.get("acodec", ""),
+            "size":     p.stat().st_size,
+        }
+
+    def thumb_for(self, path: str) -> dict:
+        """
+        A thumbnail URL for one history row, generated on demand and cached.
+
+        {"ok": False} is an ordinary answer — an audio file with no cover art
+        has no thumbnail and the UI shows a placeholder. It is not an error.
+        """
+        exe = self._ffmpeg_exe()
+        if not exe:
+            return {"ok": False}
+        thumb = preview.thumbnail(exe, path)
+        if not thumb:
+            return {"ok": False}
+        url = self._media.url_for(thumb)
+        return {"ok": bool(url), "url": url}
+
+    def save_frame(self, path: str, seconds: float, fmt: str = "png",
+                   out_dir: str = "") -> dict:
+        """Write the frame the user paused on. Fast enough to stay synchronous."""
+        try:
+            secs = float(seconds)
+        except (TypeError, ValueError):
+            return {"ok": False, "msg": "Bad timestamp."}
+
+        dst, err = preview.save_frame(self._ffmpeg_exe(), path, secs,
+                                      out_dir, fmt)
+        if err:
+            self._log(f"Frame not saved: {err}", "err")
+            return {"ok": False, "msg": err}
+        self._log(f"Saved frame → {dst}", "bright")
+        return {"ok": True, "path": dst, "name": Path(dst).name}
+
+    def plan_frames(self, path: str, mode: str, value: float) -> dict:
+        """How many files an extraction would write, asked before running it."""
+        try:
+            val = float(value)
+        except (TypeError, ValueError):
+            val = 1.0
+        return preview.plan_extraction(self._ffmpeg_exe(), path, mode, val)
+
+    def extract_frames(self, path: str, mode: str = "every", value: float = 1.0,
+                       fmt: str = "png", width: int = 0,
+                       out_dir: str = "") -> dict:
+        """
+        Start a bulk frame extraction on a worker thread.
+
+        Refuses to run alongside a download or conversion: all three share one
+        progress bar, one log and one _convert_proc handle, so overlapping them
+        would make Abort ambiguous and the progress bar meaningless.
+        """
+        if self._downloading:
+            return {"ok": False, "msg": "Wait for the current job to finish."}
+        if self._extracting:
+            return {"ok": False, "msg": "Already extracting frames."}
+        p = Path(path or "")
+        if not p.is_file():
+            return {"ok": False, "msg": "That file is no longer there."}
+        if not self._ffmpeg_exe():
+            return {"ok": False, "msg": "ffmpeg wasn't found."}
+
+        try:
+            val = float(value)
+        except (TypeError, ValueError):
+            val = 1.0
+
+        self._extracting = True
+        # A previous Abort leaves the flag set; inheriting it would kill this
+        # run before it started. Same reset the job runner does per job.
+        self._abort_flag = False
+        threading.Thread(
+            target=self._extract_worker,
+            args=(str(p), mode, val, fmt, int(width or 0), out_dir),
+            daemon=True).start()
+        return {"ok": True}
+
+    def _extract_worker(self, path, mode, value, fmt, width, out_dir):
+        try:
+            name = Path(path).name
+            self._log(f"Extracting frames from {name}…", "bright")
+            self._progress(0)
+            result = preview.extract_frames(
+                self._ffmpeg_exe(), path, out_dir, mode, value, fmt, width,
+                on_pct=lambda p: self._progress(p if p is not None else 0),
+                should_abort=lambda: self._abort_flag,
+                on_proc=lambda pr: setattr(self, "_convert_proc", pr))
+
+            self._log(result["msg"], "bright" if result["ok"] else "warn")
+            if result["ok"]:
+                self._progress(100)
+                self._log(f"Frames are in {result['folder']}", "info")
+                try:
+                    history.add("frames", f"{result['count']} frames ← {name}",
+                                "done", title=f"{result['count']} frames from {name}",
+                                path=result["folder"])
+                except Exception:
+                    pass   # history is a convenience; never fail a job over it
+            else:
+                self._progress(0)
+            # The History tab hides the shared log, so the outcome has to
+            # travel with the event or the user sees the bar vanish and
+            # nothing else.
+            self._emit("frames_done", ok=result["ok"], msg=result["msg"],
+                       folder=result.get("folder", ""),
+                       count=result.get("count", 0))
+        except Exception as e:
+            if debug_enabled():
+                debug_log(f"frame extraction failed\n{traceback.format_exc()}")
+            self._log(f"Frame extraction failed: {e}", "err")
+            self._emit("frames_done", ok=False, msg=f"Failed: {e}",
+                       folder="", count=0)
+        finally:
+            self._extracting = False
+            self._convert_proc = None
+            self._emit("history", entries=self._history_entries(50))
+            self._emit("done")
+
+    def clear_thumb_cache(self) -> dict:
+        return {"ok": True, "removed": preview.clear_cache()}
+
+    @staticmethod
+    def _ffmpeg_exe() -> str:
+        d = find_ffmpeg()
+        if not d:
+            return ""
+        return str(d / ("ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"))
 
     # ── Site sign-in (cookies) ───────────────────────────────────────────────
 
@@ -1010,6 +1211,12 @@ class API:
     # ── Queue internals ──────────────────────────────────────────────────────
 
     def _enqueue(self, kind: str, url: str, args: tuple) -> dict:
+        # A frame extraction is an ffmpeg run that shares _abort_flag and
+        # _convert_proc with the job runner. Letting a download start on top of
+        # one would make Abort kill an unpredictable half of the two.
+        if self._extracting:
+            return {"ok": False,
+                    "msg": "Wait for the frame extraction to finish."}
         with self._jobs_lock:
             self._job_seq += 1
             job = {"id": self._job_seq, "kind": kind, "url": url,

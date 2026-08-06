@@ -22,7 +22,12 @@ def main():
         js_api     = api,
         width      = 700,
         height     = 820,
-        resizable  = False,
+        # The UI sizes itself to the viewport (see html/body in index.html), so
+        # it survives any window size and there is no reason to pin it shut.
+        # min_size stops it being dragged smaller than the layout was drawn for
+        # — below this the tab strip and the Convert tab's rows start colliding.
+        resizable  = True,
+        min_size   = (700, 820),
         frameless  = True,
         text_select= True,
         background_color = "#008080",
