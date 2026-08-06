@@ -162,7 +162,7 @@ def clear_cache() -> int:
 
 # ── Single frame capture ─────────────────────────────────────────────────────
 
-def _stamp(seconds: float) -> str:
+def stamp(seconds: float) -> str:
     """Timestamp for a filename: 00-01-23-456. Colons are illegal on Windows."""
     seconds = max(0.0, float(seconds))
     h = int(seconds // 3600)
@@ -174,7 +174,7 @@ def _stamp(seconds: float) -> str:
     return f"{h:02d}-{m:02d}-{s:02d}-{ms:03d}"
 
 
-def _unique(path: Path) -> Path:
+def unique_path(path: Path) -> Path:
     """First free name at or after `path`, so a capture never overwrites."""
     if not path.exists():
         return path
@@ -214,7 +214,7 @@ def save_frame(ffmpeg_exe: str, src, seconds: float, out_dir="",
     except OSError as e:
         return "", f"Can't write to that folder: {e}"
 
-    dst = _unique(folder / f"{src.stem}_frame_{_stamp(seconds)}.{fmt}")
+    dst = unique_path(folder / f"{src.stem}_frame_{stamp(seconds)}.{fmt}")
 
     cmd = [ffmpeg_exe, "-hide_banner", "-loglevel", "error", "-nostdin",
            "-ss", f"{max(0.0, float(seconds)):.3f}", "-i", str(src),
@@ -360,7 +360,7 @@ def extract_frames(ffmpeg_exe: str, src, out_dir="", mode: str = "every",
 
     fmt = "jpg" if str(fmt).lower() in ("jpg", "jpeg") else "png"
     base = Path(out_dir) if out_dir else src.parent
-    folder = _unique_dir(base / f"{_safe_stem(src.stem)} frames")
+    folder = unique_dir(base / f"{safe_stem(src.stem)} frames")
     try:
         folder.mkdir(parents=True, exist_ok=True)
     except OSError as e:
@@ -368,7 +368,7 @@ def extract_frames(ffmpeg_exe: str, src, out_dir="", mode: str = "every",
                 "msg": f"Can't create the output folder: {e}"}
 
     duration = convert.probe(ffmpeg_exe, src).get("duration", 0.0)
-    pattern = folder / f"{_safe_stem(src.stem)}_%05d.{fmt}"
+    pattern = folder / f"{safe_stem(src.stem)}_%05d.{fmt}"
     cmd = build_extract_cmd(ffmpeg_exe, src, pattern, mode, value,
                             duration, fmt, width)
 
@@ -417,7 +417,7 @@ def extract_frames(ffmpeg_exe: str, src, out_dir="", mode: str = "every",
 _BAD_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
-def _safe_stem(stem: str) -> str:
+def safe_stem(stem: str) -> str:
     """
     Make a filename fragment out of a video title.
 
@@ -429,7 +429,7 @@ def _safe_stem(stem: str) -> str:
     return (cleaned or "frames")[:80]
 
 
-def _unique_dir(path: Path) -> Path:
+def unique_dir(path: Path) -> Path:
     if not path.exists():
         return path
     n = 1

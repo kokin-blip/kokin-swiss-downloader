@@ -278,9 +278,9 @@ _RE_DUR = re.compile(r"Duration:\s*(\d+):(\d\d):(\d\d(?:\.\d+)?)")
 _RE_STREAM = re.compile(r"Stream #\d+:\d+.*?:\s*(Video|Audio):\s*([A-Za-z0-9_]+)")
 
 
-def probe(ffmpeg_exe: str, path) -> dict:
+def _probe_stderr(ffmpeg_exe: str, path) -> str:
     """
-    Read duration and stream codecs out of a file's header.
+    Raw `ffmpeg -i` stderr for one file, or '' if it couldn't be run.
 
     Deliberately not ffprobe: the static ffprobe build is ~100 MB against an
     already-large exe, and `ffmpeg -i` with no output prints everything we need
@@ -288,12 +288,7 @@ def probe(ffmpeg_exe: str, path) -> dict:
 
     Note this call *always exits non-zero* ("At least one output file must be
     specified"). That is the expected path, not a failure.
-
-    Returns {'duration': float, 'vcodec': str, 'acodec': str}. A parse failure
-    yields duration 0.0, which callers must treat as "unknown, show an
-    indeterminate bar" — never as a reason to fail the conversion.
     """
-    info = {"duration": 0.0, "vcodec": "", "acodec": ""}
     try:
         proc = subprocess.run(
             [ffmpeg_exe, "-hide_banner", "-i", str(path)],
@@ -301,8 +296,26 @@ def probe(ffmpeg_exe: str, path) -> dict:
             stdin=subprocess.DEVNULL, timeout=30,
             creationflags=_NO_WINDOW,
         )
-        err = proc.stderr.decode("utf-8", "replace")
+        return proc.stderr.decode("utf-8", "replace")
     except Exception:
+        return ""
+
+
+def probe(ffmpeg_exe: str, path) -> dict:
+    """
+    Read duration and stream codecs out of a file's header.
+
+    Returns {'duration': float, 'vcodec': str, 'acodec': str}. A parse failure
+    yields duration 0.0, which callers must treat as "unknown, show an
+    indeterminate bar" — never as a reason to fail the conversion.
+
+    Kept deliberately narrow: this runs on the conversion hot path and four
+    call sites depend on exactly this shape. Anything richer goes in
+    probe_full(), which costs the same subprocess but parses far more.
+    """
+    info = {"duration": 0.0, "vcodec": "", "acodec": ""}
+    err = _probe_stderr(ffmpeg_exe, path)
+    if not err:
         return info
 
     m = _RE_DUR.search(err)
@@ -314,6 +327,123 @@ def probe(ffmpeg_exe: str, path) -> dict:
         if not info[key]:
             info[key] = codec.lower()
     return info
+
+
+# Parsers for probe_full. ffmpeg's -i banner is a human report, not an API, so
+# each of these is deliberately anchored on something stable and returns a
+# neutral value rather than raising when the line looks unfamiliar.
+_RE_FORMAT = re.compile(r"^Input #\d+,\s*(.+?), from ", re.M)
+_RE_KBPS = re.compile(r"(\d+)\s*kb/s")
+_RE_STREAM_LINE = re.compile(
+    r"^\s*Stream #\d+:\d+.*?:\s*(Video|Audio):\s*(.+)$", re.M)
+# 1920x1080 — but *not* the 0x31637661 half of a fourcc like (avc1 / 0x31637661).
+# Requiring two digits either side is what rules that out: the hex form always
+# has a single '0' in front of the 'x'.
+_RE_DIMS = re.compile(r"(?<![\dA-Fa-fxX])(\d{2,5})x(\d{2,5})(?![\dA-Fa-fxX])")
+_RE_FPS = re.compile(r"(\d+(?:\.\d+)?)\s*fps")
+_RE_HZ = re.compile(r"(\d+)\s*Hz")
+_RE_PIXFMT = re.compile(
+    r"\b(yuvj?[0-9]{3}[a-z0-9]*|gbrp[a-z0-9]*|rgb[a-z0-9]*|bgr[a-z0-9]*"
+    r"|gray[a-z0-9]*|nv[0-9]+|p0[0-9]{2}[a-z0-9]*)\b")
+# The parenthesised group right after a codec name is a profile ("High",
+# "LC", "Baseline") — unless it holds a '/', which makes it the fourcc.
+_RE_PROFILE = re.compile(r"^[A-Za-z0-9_]+\s*\(([^()/]+)\)")
+
+_CHANNEL_NAMES = {"mono": 1, "stereo": 2, "2.1": 3, "quad": 4, "4.0": 4,
+                  "5.0": 5, "5.1": 6, "6.1": 7, "7.1": 8, "downmix": 2}
+
+
+def _first_int(rx, text, default=0) -> int:
+    m = rx.search(text)
+    if not m:
+        return default
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return default
+
+
+def probe_full(ffmpeg_exe: str, path) -> dict:
+    """
+    Everything the History tab shows about a file, from one header read.
+
+    Same subprocess cost as probe(); the difference is entirely in the parsing.
+    Every field degrades to 0 or '' rather than failing, because "we couldn't
+    read the frame rate" must never stop somebody previewing a video.
+
+    Returns duration, format, bitrate (bits/s, 0 = unknown), has_cover, and the
+    first video/audio stream's details.
+
+    Cover art is the trap here: an MP3 or FLAC's embedded artwork is reported
+    as a real video stream ("Video: mjpeg ... 640x640 ... (attached pic)").
+    Such a stream sets has_cover and nothing else — treating it as footage
+    would show a music file as a 640x640 video.
+    """
+    out = {
+        "duration": 0.0, "format": "", "bitrate": 0, "has_cover": False,
+        "vcodec": "", "vprofile": "", "width": 0, "height": 0, "fps": 0.0,
+        "vbitrate": 0, "pix_fmt": "",
+        "acodec": "", "aprofile": "", "sample_rate": 0, "channels": 0,
+        "abitrate": 0,
+    }
+    err = _probe_stderr(ffmpeg_exe, path)
+    if not err:
+        return out
+
+    m = _RE_DUR.search(err)
+    if m:
+        h, mi, s = m.groups()
+        out["duration"] = int(h) * 3600 + int(mi) * 60 + float(s)
+
+    m = _RE_FORMAT.search(err)
+    if m:
+        out["format"] = m.group(1).strip()
+
+    # The container bitrate lives on the Duration line; a stream's own kb/s
+    # appears later, so slice to that line rather than searching the whole blob.
+    dur_line = next((ln for ln in err.splitlines() if "Duration:" in ln), "")
+    out["bitrate"] = _first_int(_RE_KBPS, dur_line) * 1000
+
+    for kind, rest in _RE_STREAM_LINE.findall(err):
+        rest = rest.strip()
+        codec = rest.split(",")[0].split(" ")[0].split("(")[0].strip().lower()
+        pm = _RE_PROFILE.match(rest)
+        profile = pm.group(1).strip() if pm else ""
+
+        if kind == "Video":
+            if "attached pic" in rest:
+                out["has_cover"] = True
+                continue
+            if out["vcodec"]:
+                continue
+            out["vcodec"], out["vprofile"] = codec, profile
+            d = _RE_DIMS.search(rest)
+            if d:
+                out["width"], out["height"] = int(d.group(1)), int(d.group(2))
+            f = _RE_FPS.search(rest)
+            if f:
+                try:
+                    out["fps"] = float(f.group(1))
+                except ValueError:
+                    pass
+            p = _RE_PIXFMT.search(rest)
+            if p:
+                out["pix_fmt"] = p.group(1)
+            out["vbitrate"] = _first_int(_RE_KBPS, rest) * 1000
+        else:
+            if out["acodec"]:
+                continue
+            out["acodec"], out["aprofile"] = codec, profile
+            out["sample_rate"] = _first_int(_RE_HZ, rest)
+            out["abitrate"] = _first_int(_RE_KBPS, rest) * 1000
+            for field in (x.strip().lower() for x in rest.split(",")):
+                if field in _CHANNEL_NAMES:
+                    out["channels"] = _CHANNEL_NAMES[field]
+                    break
+                if field.endswith(" channels"):
+                    out["channels"] = _int(field.split(" ")[0])
+                    break
+    return out
 
 
 def can_stream_copy(target: str, info: dict, opts: dict,
@@ -401,8 +531,28 @@ def _time_arg(v) -> str:
     return s if s and _RE_TIME.match(s) else ""
 
 
-def _audio_args(target: str, quality, opts: dict) -> list:
-    """Encoder flags for an audio target, honouring an Advanced bitrate."""
+def _time_secs(v) -> float:
+    """The same accepted formats as _time_arg, in seconds. 0.0 if unparseable."""
+    s = _time_arg(v)
+    if not s:
+        return 0.0
+    total = 0.0
+    try:
+        for part in s.split(":"):
+            total = total * 60 + float(part)
+    except ValueError:
+        return 0.0
+    return total
+
+
+def audio_args(target: str, quality, opts: dict) -> list:
+    """
+    Encoder flags for an audio target, honouring an Advanced bitrate.
+
+    Public because mediaops.py needs the same table: an audio container will
+    only accept certain codecs, and there is no version of "clip a FLAC" that
+    should be deciding that independently of "convert to FLAC".
+    """
     br = str(opts.get("bitrate") or "").strip()
     if br and not br.endswith("k"):
         br += "k"
@@ -468,9 +618,22 @@ def build_cmd(ffmpeg_exe: str, src, tmp_dst, target: str, quality,
     if ss:
         cmd += ["-ss", ss]
     cmd += ["-i", str(src)]
+
+    # "Trim end" means an end time measured from the start of the file, which
+    # is the only reading of that label. -to would *not* give that: with -ss
+    # before -i, ffmpeg measures -to from the seek point, so "start 5, end 8"
+    # produced an 8-second clip instead of a 3-second one. Express it as a
+    # duration and the ambiguity disappears.
     to = _time_arg(opts.get("trimEnd"))
+    dur_arg = ""
     if to:
-        cmd += ["-to", to]
+        span = _time_secs(to) - _time_secs(ss)
+        # An end at or before the start is a typo, not a request for an empty
+        # file; ignore the field rather than write zero bytes.
+        if span > 0:
+            dur_arg = f"{span:.3f}"
+    if dur_arg:
+        cmd += ["-t", dur_arg]
 
     if target == "gif":
         fps, width = _GIF_STEPS[max(0, min(4, _int(quality, 2)))]
@@ -486,7 +649,7 @@ def build_cmd(ffmpeg_exe: str, src, tmp_dst, target: str, quality,
                 "-loop", "0", "-an"]
         # A GIF of a feature film is gigabytes nobody wants; cap it unless the
         # user set an explicit trim.
-        if not to:
+        if not dur_arg:
             cmd += ["-t", str(_int(opts.get("gifSeconds"), 30) or 30)]
         cmd.append(str(tmp_dst))
         return cmd
@@ -500,7 +663,7 @@ def build_cmd(ffmpeg_exe: str, src, tmp_dst, target: str, quality,
             cmd += ["-c:v", "copy", "-disposition:v", "attached_pic"]
         else:
             cmd += ["-vn"]
-        cmd += ["-c:a", "copy"] if copy_a else _audio_args(target, quality, opts)
+        cmd += ["-c:a", "copy"] if copy_a else audio_args(target, quality, opts)
         sr, ch = _int(opts.get("sampleRate")), _int(opts.get("channels"))
         if sr and not copy_a:
             cmd += ["-ar", str(sr)]

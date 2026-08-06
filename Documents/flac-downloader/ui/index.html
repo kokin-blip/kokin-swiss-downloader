@@ -687,12 +687,39 @@ hr.separator {
   padding: 1px 4px; background: var(--win-light);
   box-shadow: inset 1px 1px 0 var(--win-dark);
 }
-.hist-extract {
+/* One row of tab-like buttons picking which panel is shown below. Only ever
+   one panel is visible, so adding a feature costs a button and nothing in
+   vertical space — which is the whole point in a 700x820 window. */
+.hist-actions {
   display: flex; gap: 4px; align-items: center; margin-top: 4px;
   padding-top: 4px; border-top: 1px solid var(--win-dark);
 }
-.hist-extract select.form-control { width: auto; }
-.hist-extract input.form-control  { width: 52px; }
+.hist-actions .btn.on {
+  box-shadow: inset 1px 1px 0 var(--win-darker), inset -1px -1px 0 var(--win-light),
+              inset 2px 2px 0 var(--win-dark),   inset -2px -2px 0 var(--win-lighter);
+  font-weight: bold;
+}
+.hist-panel {
+  display: flex; gap: 4px; align-items: center; flex-wrap: wrap;
+  margin-top: 4px;
+}
+.hist-panel select.form-control { width: auto; }
+.hist-panel input.form-control  { width: 52px; }
+.hist-panel input.time          { width: 66px; font-family: 'Courier New', monospace; }
+.hist-panel label.chk { display: flex; align-items: center; gap: 3px;
+                        font-size: 10px; color: var(--win-dark); }
+
+/* Two columns of key/value pairs. auto-fit keeps it one column when the
+   window is narrow instead of squashing the values into ellipsis. */
+.hist-info {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0 12px; width: 100%; margin-top: 4px;
+  max-height: 108px; overflow-y: auto;
+}
+.hist-info div { display: flex; gap: 6px; font-size: 10px; line-height: 1.5; }
+.hist-info dt { flex: 0 0 74px; color: var(--win-dark); }
+.hist-info dd { flex: 1 1 auto; margin: 0; overflow: hidden;
+                text-overflow: ellipsis; white-space: nowrap; }
 .hist-xbar {
   flex: 1 1 auto; height: 12px; background: var(--win-light);
   box-shadow: inset 1px 1px 0 var(--win-dark);
@@ -1263,8 +1290,41 @@ hr.separator {
                   title="Write the frame shown above to disk, at full resolution">Save this frame</button>
         </div>
 
-        <!-- Bulk extraction. -->
-        <div class="hist-extract" id="histExtract" style="display:none">
+        <!-- One panel at a time, picked here. -->
+        <div class="hist-actions" id="histActions" style="display:none">
+          <button class="btn" id="histTabInfo"   onclick="histPanel('info')">Info</button>
+          <button class="btn" id="histTabClip"   onclick="histPanel('clip')">Clip</button>
+          <button class="btn" id="histTabFrames" onclick="histPanel('frames')">Frames</button>
+          <span class="spacer"></span>
+          <div class="hist-xbar" id="histXBar" style="display:none">
+            <div class="hist-xfill" id="histXFill"></div>
+            <div class="hist-xlabel" id="histXLabel"></div>
+          </div>
+          <button class="btn" id="histXStop" onclick="abortDownload()"
+                  style="display:none">Stop</button>
+        </div>
+
+        <!-- Panel: what this file actually is. -->
+        <dl class="hist-info" id="histPanelInfo" style="display:none"></dl>
+
+        <!-- Panel: cut a piece out. -->
+        <div class="hist-panel" id="histPanelClip" style="display:none">
+          <button class="btn" onclick="histSetPoint('in')"
+                  title="Use the current position as the start">Set in</button>
+          <input type="text" class="form-control time" id="histClipIn" value="0:00.0"
+                 oninput="histClipHint()">
+          <button class="btn" onclick="histSetPoint('out')"
+                  title="Use the current position as the end">Set out</button>
+          <input type="text" class="form-control time" id="histClipOut" value="0:00.0"
+                 oninput="histClipHint()">
+          <label class="chk" title="Instant, but starts at the nearest keyframe">
+            <input type="checkbox" id="histClipFast"> Fast cut
+          </label>
+          <button class="btn" id="histClipBtn" onclick="histExportClip()">Save clip</button>
+        </div>
+
+        <!-- Panel: bulk frame extraction. -->
+        <div class="hist-panel" id="histPanelFrames" style="display:none">
           <select class="form-control" id="histXMode" onchange="onHistModeChange()">
             <option value="every">Every</option>
             <option value="count">Total</option>
@@ -1278,13 +1338,8 @@ hr.separator {
             <option value="jpg">JPEG</option>
           </select>
           <button class="btn" id="histXBtn" onclick="histExtract()">Extract frames</button>
-          <div class="hist-xbar" id="histXBar" style="display:none">
-            <div class="hist-xfill" id="histXFill"></div>
-            <div class="hist-xlabel" id="histXLabel"></div>
-          </div>
-          <button class="btn" id="histXStop" onclick="abortDownload()"
-                  style="display:none">Stop</button>
         </div>
+
         <div class="label-sm mt4" id="histXHint">&nbsp;</div>
       </div>
 
@@ -2031,6 +2086,12 @@ function fmtBytes(n) {
   return (i === 0 ? n : n.toFixed(n < 10 ? 1 : 0)) + ' ' + u[i];
 }
 
+// Job kinds whose history "url" is a human label ("clip 0:04–0:07 ← x.mp4"),
+// not something that can be re-run from a URL. Anything listed here gets no ↻
+// and never reaches the download tabs — otherwise the button pastes a
+// sentence into the Audio URL box.
+const LOCAL_KINDS = new Set(['convert', 'frames', 'clip']);
+
 function fmtClock(s, withCentis) {
   if (!isFinite(s) || s < 0) s = 0;
   const m = Math.floor(s / 60);
@@ -2083,7 +2144,7 @@ function renderHistoryTab() {
       acts.push(`<span class="hist-act" title="Show in folder"
                        onclick="event.stopPropagation();revealFile(${jsArg(e.path)})">📂</span>`);
     }
-    if (e.kind !== 'convert' && e.kind !== 'frames') {
+    if (!LOCAL_KINDS.has(e.kind)) {
       acts.push(`<span class="hist-act" title="Download again"
                        onclick="event.stopPropagation();redownload(${jsArg(e.url)},'${e.kind}')">↻</span>`);
     }
@@ -2158,6 +2219,50 @@ function histStageMsg(text) {
     `<div class="hist-stage-msg">${escapeHtml(text)}</div>`;
 }
 
+// The panel currently open, so the choice survives clicking between files.
+let _histPanel = 'info';
+// media_info for the selected row, kept for the Info panel and clip bounds.
+let _histInfo = null;
+
+const HIST_PANELS = {
+  info:   {tab: 'histTabInfo',   el: 'histPanelInfo',   kinds: ['video', 'audio', 'image']},
+  clip:   {tab: 'histTabClip',   el: 'histPanelClip',   kinds: ['video', 'audio']},
+  frames: {tab: 'histTabFrames', el: 'histPanelFrames', kinds: ['video']},
+};
+
+function histPanel(name) {
+  const kind = _histInfo ? _histInfo.kind : '';
+  // Falling back to Info rather than showing nothing: switching from a video
+  // to an image with Frames open would otherwise leave a blank strip.
+  if (!HIST_PANELS[name] || !HIST_PANELS[name].kinds.includes(kind)) name = 'info';
+  _histPanel = name;
+  for (const [key, p] of Object.entries(HIST_PANELS)) {
+    const usable = HIST_PANELS[key].kinds.includes(kind);
+    const tab = document.getElementById(p.tab);
+    tab.style.display = usable ? '' : 'none';
+    tab.classList.toggle('on', usable && key === name);
+    document.getElementById(p.el).style.display = (usable && key === name) ? '' : 'none';
+  }
+  // The hint line under the panels is shared, so whoever takes the panel owns
+  // it — otherwise "About 340 images" stays on screen next to the clip fields.
+  if (name === 'frames') onHistModeChange();
+  else if (name === 'clip') histClipHint();
+  else {
+    document.getElementById('histXHint').innerHTML = '&nbsp;';
+    document.getElementById('histXHint').style.color = '';
+  }
+}
+
+function histHidePanels() {
+  document.getElementById('histCtl').style.display = 'none';
+  document.getElementById('histActions').style.display = 'none';
+  for (const p of Object.values(HIST_PANELS)) {
+    document.getElementById(p.el).style.display = 'none';
+  }
+  document.getElementById('histXHint').innerHTML = '&nbsp;';
+  document.getElementById('histXHint').style.color = '';
+}
+
 function histUnload() {
   // Releasing the src matters: while a <video> holds the URL open the media
   // server keeps a socket and a file handle live, and Windows will refuse to
@@ -2165,9 +2270,8 @@ function histUnload() {
   const v = document.getElementById('histVideo');
   if (v) { try { v.pause(); } catch (_) {} v.removeAttribute('src'); v.load(); }
   _histSelPath = null;
-  document.getElementById('histCtl').style.display = 'none';
-  document.getElementById('histExtract').style.display = 'none';
-  document.getElementById('histXHint').innerHTML = '&nbsp;';
+  _histInfo = null;
+  histHidePanels();
   histStageMsg('Pick something above to preview it.');
 }
 
@@ -2175,11 +2279,9 @@ async function histSelect(i) {
   const e = _histEntries[i];
   if (!e) return;
   _histSelPath = e.path;
+  _histInfo = null;
   renderHistoryTab();
-
-  document.getElementById('histCtl').style.display = 'none';
-  document.getElementById('histExtract').style.display = 'none';
-  document.getElementById('histXHint').innerHTML = '&nbsp;';
+  histHidePanels();
 
   if (!e.exists) { histStageMsg('That file has been moved or deleted.'); return; }
   if (!e.media)  { histStageMsg(e.kind === 'frames'
@@ -2191,33 +2293,143 @@ async function histSelect(i) {
   if (!info.ok) { histStageMsg(info.msg || "Can't preview that."); return; }
   // Slow probe + fast clicking: only paint if this is still the chosen row.
   if (_histSelPath !== e.path) return;
+  _histInfo = info;
 
   const stage = document.getElementById('histStage');
   const src   = escapeAttr(info.url);
 
   if (info.kind === 'image') {
     stage.innerHTML = `<img src="${src}" alt="">`;
-    return;
-  }
-  if (info.kind === 'audio') {
+  } else if (info.kind === 'audio') {
     stage.innerHTML = `<audio id="histVideo" src="${src}" controls autoplay></audio>`;
-    return;
+  } else {
+    // Video: crossorigin lets the canvas be read if we ever want a client-side
+    // grab; the media server sends the matching Access-Control-Allow-Origin.
+    stage.innerHTML = `<video id="histVideo" src="${src}" controls autoplay
+                              crossorigin="anonymous"></video>`;
   }
 
-  // Video: crossorigin lets the canvas be read if we ever want a client-side
-  // grab; the media server sends the matching Access-Control-Allow-Origin.
-  stage.innerHTML = `<video id="histVideo" src="${src}" controls autoplay
-                            crossorigin="anonymous"></video>`;
   const v = document.getElementById('histVideo');
-  v.addEventListener('timeupdate', histTick);
-  v.addEventListener('seeked',     histTick);
-  v.addEventListener('loadedmetadata', histTick);
-  v.addEventListener('error', () => histStageMsg(
-    "This one won't play in the preview window — 📂 opens it in your player."));
+  if (v) {
+    v.addEventListener('timeupdate', histTick);
+    v.addEventListener('seeked',     histTick);
+    v.addEventListener('loadedmetadata', histTick);
+    v.addEventListener('error', () => histStageMsg(
+      "This one won't play in the preview window — 📂 opens it in your player."));
+  }
+  if (info.kind === 'video') document.getElementById('histCtl').style.display = 'flex';
 
-  document.getElementById('histCtl').style.display = 'flex';
-  document.getElementById('histExtract').style.display = 'flex';
-  onHistModeChange();
+  document.getElementById('histActions').style.display = 'flex';
+  renderHistInfo(info);
+  histClipReset(info);
+  histPanel(_histPanel);
+}
+
+// ── Info panel ────────────────────────────────────────────────────────────────
+
+function fmtBitrate(bps) {
+  if (!bps) return '';
+  return bps >= 1000000 ? (bps / 1000000).toFixed(1) + ' Mbps'
+                        : Math.round(bps / 1000) + ' kbps';
+}
+
+function fmtChannels(n) {
+  return {1: 'mono', 2: 'stereo', 6: '5.1', 8: '7.1'}[n] || (n ? n + ' channels' : '');
+}
+
+function renderHistInfo(info) {
+  // Every field is best-effort — probe_full degrades to 0/'' rather than
+  // failing — so a row we have no value for is simply left out. Printing
+  // "0 kbps" or "unknown" for a dozen rows would be worse than a short list.
+  const rows = [
+    ['File',       info.name],
+    ['Size',       fmtBytes(info.size)],
+    ['Length',     info.duration ? fmtClock(info.duration, false) : ''],
+    ['Format',     info.format],
+    ['Bitrate',    fmtBitrate(info.bitrate)],
+    ['Video',      [info.vcodec, info.vprofile && `(${info.vprofile})`].filter(Boolean).join(' ')],
+    ['Size (px)',  info.width && info.height ? `${info.width} × ${info.height}` : ''],
+    ['Frame rate', info.fps ? info.fps + ' fps' : ''],
+    ['Colour',     info.pix_fmt],
+    ['Audio',      [info.acodec, info.aprofile && `(${info.aprofile})`].filter(Boolean).join(' ')],
+    ['Sample rate', info.sample_rate ? (info.sample_rate / 1000).toFixed(1) + ' kHz' : ''],
+    ['Channels',   fmtChannels(info.channels)],
+    ['Cover art',  info.has_cover ? 'yes' : ''],
+  ].filter(r => r[1]);
+
+  document.getElementById('histPanelInfo').innerHTML = rows.map(([k, v]) =>
+    `<div><dt>${escapeHtml(k)}</dt><dd title="${escapeAttr(String(v))}">${escapeHtml(String(v))}</dd></div>`
+  ).join('');
+}
+
+// ── Clip panel ────────────────────────────────────────────────────────────────
+
+// "1:23.4", "83.4" and "1:02:03" all mean something obvious; accept all three
+// rather than making someone match a format. NaN means "couldn't read it",
+// which the caller reports instead of silently cutting from zero.
+function parseClock(text) {
+  const s = String(text || '').trim();
+  if (!s) return NaN;
+  const parts = s.split(':');
+  if (parts.some(p => p === '' || !/^\d*\.?\d*$/.test(p))) return NaN;
+  return parts.reduce((acc, p) => acc * 60 + parseFloat(p || '0'), 0);
+}
+
+function histClipReset(info) {
+  document.getElementById('histClipIn').value  = fmtClock(0, true);
+  document.getElementById('histClipOut').value = fmtClock(info.duration || 0, true);
+  document.getElementById('histClipFast').checked = false;
+  // A fast cut on audio is worse, not faster: the copied header keeps the
+  // source's length, so the clip misreports its own duration. The backend
+  // ignores the flag for audio; hide it so nobody wonders why.
+  document.getElementById('histClipFast').parentElement.style.display =
+    info.kind === 'video' ? '' : 'none';
+  histClipHint();
+}
+
+function histSetPoint(which) {
+  const v = document.getElementById('histVideo');
+  if (!v) return;
+  document.getElementById(which === 'in' ? 'histClipIn' : 'histClipOut').value =
+    fmtClock(v.currentTime, true);
+  histClipHint();
+}
+
+function histClipHint() {
+  const hint = document.getElementById('histXHint');
+  const a = parseClock(document.getElementById('histClipIn').value);
+  const b = parseClock(document.getElementById('histClipOut').value);
+  if (isNaN(a) || isNaN(b)) {
+    hint.textContent = 'In and out want a time like 1:23.4';
+    hint.style.color = '#aa0000';
+  } else if (b - a < 0.05) {
+    hint.textContent = 'The out point has to come after the in point.';
+    hint.style.color = '#aa0000';
+  } else {
+    hint.textContent = `Clip length ${fmtClock(b - a, true)}.`;
+    hint.style.color = '';
+  }
+}
+
+async function histExportClip() {
+  const e = histCurrent();
+  if (!e) return;
+  const a = parseClock(document.getElementById('histClipIn').value);
+  const b = parseClock(document.getElementById('histClipOut').value);
+  const hint = document.getElementById('histXHint');
+  if (isNaN(a) || isNaN(b) || b - a < 0.05) { histClipHint(); return; }
+
+  const r = await api('export_clip', e.path, a, b,
+                      document.getElementById('histClipFast').checked, '');
+  if (!r.ok) {
+    hint.textContent = r.msg || "Couldn't start.";
+    hint.style.color = '#aa0000';
+    return;
+  }
+  histBusy(true);
+  hint.textContent = 'Cutting…';
+  hint.style.color = '';
+  startPolling();
 }
 
 function histTick() {
@@ -2311,12 +2523,16 @@ async function histExtract() {
     hint.style.color = '#aa0000';
     return;
   }
-  histExtractBusy(true);
+  histBusy(true);
   startPolling();   // progress and the finish event arrive through the normal feed
 }
 
-function histExtractBusy(on) {
+// Shared by every long-running History operation. They all run one at a time
+// (extraction on its own thread, everything else on the job queue), so one
+// bar, one Stop button and one disabled set is the honest representation.
+function histBusy(on) {
   document.getElementById('histXBtn').disabled = on;
+  document.getElementById('histClipBtn').disabled = on;
   document.getElementById('histXBar').style.display  = on ? '' : 'none';
   document.getElementById('histXStop').style.display = on ? '' : 'none';
   if (on) histExtractProgress(0);
@@ -2327,32 +2543,45 @@ function histExtractProgress(pct) {
   document.getElementById('histXLabel').textContent = Math.round(pct) + '%';
 }
 
-function onFramesDone(u) {
-  histExtractBusy(false);
+// A new file worth one click to reach — this tab has no log to print a path
+// into, so the link has to travel with the result.
+function histDoneHint(ok, msg, target, label) {
   const hint = document.getElementById('histXHint');
-  hint.style.color = u.ok ? '#006600' : '#aa0000';
-  hint.textContent = u.msg || '';
-  // A folder full of new files is worth one click to reach, and this tab has
-  // no log to print the path into.
-  if (u.folder) {
+  hint.style.color = ok ? '#006600' : '#aa0000';
+  hint.textContent = msg || '';
+  if (target) {
     hint.insertAdjacentHTML('beforeend',
       ` <span class="hist-act" style="color:var(--win-blue);text-decoration:underline"
-              onclick="revealFile(${jsArg(u.folder)})">open folder</span>`);
+              onclick="revealFile(${jsArg(target)})">${escapeHtml(label)}</span>`);
   }
+}
+
+function onFramesDone(u) {
+  histBusy(false);
+  histDoneHint(u.ok, u.msg, u.folder, 'open folder');
+}
+
+function onMediaopDone(u) {
+  histBusy(false);
+  histDoneHint(u.ok, u.msg, u.path, 'show it');
 }
 async function revealFile(path) {
   const r = await api('reveal_file', path);
   if (!r.ok) appendLog(r.msg, 'warn');
 }
+const LOCAL_KIND_HINT = {
+  convert: ['convert', 'That was a conversion — pick the files again to repeat it.'],
+  frames:  ['history', 'That was a frame extraction — pick the video again to repeat it.'],
+  clip:    ['history', 'That was a clip — pick the video again to cut another.'],
+};
+
 function redownload(url, kind) {
-  // A conversion's history "url" is a label like "12 files → MP3", not a path,
-  // so there is nothing to re-run from — send them to the tab instead. Frame
-  // extractions are labels too ("40 frames ← clip.mp4").
-  if (kind === 'convert' || kind === 'frames') {
-    switchTab(kind === 'frames' ? 'history' : 'convert');
-    appendLog(kind === 'frames'
-      ? 'That was a frame extraction — pick the video again to repeat it.'
-      : 'That was a conversion — pick the files again to repeat it.', 'info');
+  // These kinds' history "url" is a label like "12 files → MP3", not something
+  // that can be re-run from a URL, so send the user to the tab instead.
+  if (LOCAL_KINDS.has(kind)) {
+    const [tab, msg] = LOCAL_KIND_HINT[kind] || ['history', 'Open it from the History tab.'];
+    switchTab(tab);
+    appendLog(msg, 'info');
     return;
   }
   // Drop the URL back into the right tab and let the user hit Download, rather
@@ -2406,7 +2635,10 @@ const QUEUE_BADGE = {
   cancelled: ['—', 'cancelled'],
 };
 // .queue-kind is 34px wide, so 'convert' would be clipped — 'conv' fits.
-const QUEUE_KIND = { audio: 'audio', video: 'video', convert: 'conv' };
+// Every job kind needs an entry; a missing one prints the raw kind and
+// overflows the badge.
+const QUEUE_KIND = { audio: 'audio', video: 'video', convert: 'conv',
+                     clip: 'clip' };
 
 function renderQueue(jobs) {
   const wrap = document.getElementById('queueWrap');
@@ -2490,6 +2722,7 @@ async function pollUpdates() {
     else if (u.kind === 'queue')            renderQueue(u.jobs || []);
     else if (u.kind === 'history')          renderHistory(u.entries || []);
     else if (u.kind === 'frames_done')      onFramesDone(u);
+    else if (u.kind === 'mediaop_done')     onMediaopDone(u);
     else if (u.kind === 'login_state') {
       document.getElementById('btnLogin').disabled = !!u.busy;
       if (u.sites) renderCookies(u.sites);
@@ -2501,9 +2734,9 @@ async function pollUpdates() {
       document.getElementById('btnDownloadVideo').disabled = false;
       document.getElementById('btnConvert').disabled       = false;
       document.getElementById('btnAbort').disabled         = true;
-      // Belt and braces: an extraction that dies without emitting frames_done
-      // would otherwise leave the Extract button disabled forever.
-      histExtractBusy(false);
+      // Belt and braces: an operation that dies without emitting its own
+      // _done event would otherwise leave these buttons disabled forever.
+      histBusy(false);
       setStatus('Ready');
     }
   });

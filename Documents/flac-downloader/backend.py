@@ -23,6 +23,7 @@ import settings as cfg
 import cookies as site_cookies
 import convert
 import history
+import mediaops
 import preview
 from mediaserver import MediaServer
 from providers import (OdesliResolver, QobuzAPI, SpotiflacProxy,
@@ -418,6 +419,32 @@ def _browser_grab(page_url, log, timeout=60, attempts=3, should_abort=None):
             log(f"Browser grab found nothing (attempt {i}/{attempts}) — retrying...", "warn")
 
     return None, None, None
+
+
+# ── Media operations ─────────────────────────────────────────────────────────
+#
+# One queued job kind per entry. Each function takes the same shape —
+# (ffmpeg, src, out_dir, params, on_pct=, should_abort=, on_proc=) — and
+# returns mediaops' {'ok', 'path', 'msg'}, so API._worker_mediaop can drive
+# all of them without knowing which is which. Adding an operation is this
+# function plus a line in _MEDIAOP_VERB, not another worker and another flag.
+
+def _op_clip(exe, src, out_dir, params, **cb) -> dict:
+    return mediaops.clip(exe, src, params.get("start", 0.0),
+                         params.get("end", 0.0), out_dir,
+                         fast=params.get("fast", False), **cb)
+
+
+_MEDIAOPS = {"clip": _op_clip}
+
+_MEDIAOP_VERB = {"clip": "Cutting"}
+
+
+def _clock(secs: float) -> str:
+    """m:ss for a job label. Hours are rare enough to spell out in full."""
+    secs = max(0.0, float(secs or 0))
+    h, m, s = int(secs // 3600), int(secs % 3600 // 60), int(secs % 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
 class API:
@@ -945,16 +972,24 @@ class API:
         if kind in ("audio", "video"):
             exe = self._ffmpeg_exe()
             if exe:
-                info = convert.probe(exe, p)
+                info = convert.probe_full(exe, p)
         return {
-            "ok":       True,
-            "url":      url,
-            "kind":     kind,
-            "name":     p.name,
-            "duration": info.get("duration", 0.0),
-            "vcodec":   info.get("vcodec", ""),
-            "acodec":   info.get("acodec", ""),
-            "size":     p.stat().st_size,
+            "ok":     True,
+            "url":    url,
+            "kind":   kind,
+            "name":   p.name,
+            "path":   str(p),
+            "size":   p.stat().st_size,
+            "ext":    p.suffix.lower().lstrip("."),
+            # Everything below is best-effort: probe_full degrades each field
+            # to 0 or '' rather than failing, and the UI simply omits the rows
+            # it has no value for.
+            **{k: info.get(k, d) for k, d in (
+                ("duration", 0.0), ("format", ""), ("bitrate", 0),
+                ("has_cover", False), ("vcodec", ""), ("vprofile", ""),
+                ("width", 0), ("height", 0), ("fps", 0.0), ("vbitrate", 0),
+                ("pix_fmt", ""), ("acodec", ""), ("aprofile", ""),
+                ("sample_rate", 0), ("channels", 0), ("abitrate", 0))},
         }
 
     def thumb_for(self, path: str) -> dict:
@@ -1075,6 +1110,77 @@ class API:
 
     def clear_thumb_cache(self) -> dict:
         return {"ok": True, "removed": preview.clear_cache()}
+
+    # ── Media operations (clip, and later: sheet / fit / normalise) ───────────
+    #
+    # These go on the job queue rather than running on their own thread the way
+    # extract_frames does. Anything that runs ffmpeg to completion over a whole
+    # file shares _abort_flag and _convert_proc with the runner, and every such
+    # feature that opts out needs its own mutual-exclusion flag — four of them
+    # and Abort no longer knows which process it is killing. The queue already
+    # gives us single-process safety, an unambiguous Abort, history and
+    # progress; the only thing it lacked was a per-tab completion event, and
+    # that is what mediaop_done is.
+
+    def export_clip(self, path: str, start: float, end: float,
+                    fast: bool = False, out_dir: str = "") -> dict:
+        """Queue a cut of path[start:end] as its own file."""
+        p = Path(path or "")
+        if not p.is_file():
+            return {"ok": False, "msg": "That file is no longer there."}
+        try:
+            start, end = float(start), float(end)
+        except (TypeError, ValueError):
+            return {"ok": False, "msg": "Bad in/out points."}
+        if end - start < 0.05:
+            return {"ok": False, "msg": "The out point has to come after the in point."}
+
+        label = f"clip {_clock(start)}–{_clock(end)} ← {p.name}"
+        return self._enqueue("clip", label,
+                             ("clip", str(p), out_dir,
+                              {"start": start, "end": end, "fast": bool(fast)}))
+
+    def _worker_mediaop(self, op: str, src: str, out_dir: str, params: dict):
+        """
+        Run one queued media operation. Shared by every kind in _MEDIAOPS.
+
+        The History tab hides the shared log, so the outcome has to travel with
+        the mediaop_done event as well as being logged — otherwise the user
+        watches the progress bar vanish and is told nothing.
+        """
+        name = Path(src).name
+        fn = _MEDIAOPS.get(op)
+        if fn is None:                     # only reachable via a coding error
+            self._log(f"Unknown media operation: {op}", "err")
+            self._emit("mediaop_done", op=op, ok=False,
+                       msg="That operation isn't available.", path="")
+            return
+
+        self._log(f"{_MEDIAOP_VERB.get(op, 'Working on')} {name}…", "bright")
+        self._progress(0)
+        result = fn(
+            self._ffmpeg_exe(), src, out_dir, params,
+            on_pct=lambda p: self._progress(p if p is not None else 0),
+            should_abort=lambda: self._abort_flag,
+            on_proc=lambda pr: setattr(self, "_convert_proc", pr))
+
+        self._convert_proc = None
+        self._log(result["msg"], "bright" if result["ok"] else "warn")
+        if result["ok"]:
+            self._progress(100)
+            self._last_file = result["path"]
+            # Without this the runner records the job as failed no matter what
+            # the worker returned.
+            self._emit("success", path=result["path"])
+        else:
+            self._progress(0)
+            # Same rule as a frame extraction: History records the files these
+            # produced, so an attempt that produced none leaves no row. A
+            # failed *download* is worth keeping because it can be retried
+            # from the URL; a clip that failed is just redone from the player.
+            self._skip_history = True
+        self._emit("mediaop_done", op=op, ok=result["ok"], msg=result["msg"],
+                   path=result.get("path", ""))
 
     @staticmethod
     def _ffmpeg_exe() -> str:
@@ -1273,7 +1379,11 @@ class API:
                 self._last_file    = ""
                 self._skip_history = False
                 self._push_queue()
-                fn = {"audio":   self._worker,
+                # Every media operation shares one worker; the op name travels
+                # in args[0]. An unknown kind still raises, which is what we
+                # want — it can only mean _enqueue was called with a typo.
+                fn = {**{k: self._worker_mediaop for k in _MEDIAOPS},
+                      "audio":   self._worker,
                       "video":   self._worker_video,
                       "convert": self._worker_convert}[job["kind"]]
                 try:
