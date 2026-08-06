@@ -21,6 +21,7 @@ except ImportError:
 
 import settings as cfg
 import cookies as site_cookies
+import convert
 import history
 from providers import (OdesliResolver, QobuzAPI, SpotiflacProxy,
                        MusicBrainz, is_drm_error, friendly_dl_error,
@@ -435,6 +436,10 @@ class API:
         self._logging_in      = False
         self._last_file       = ""      # last path yt-dlp reported writing
         self._skip_history    = False   # set by probe-only jobs (list formats)
+        # Live ffmpeg process for a conversion, so Abort can kill it outright
+        # rather than waiting for the next progress line (a stalled encode
+        # emits none, and the read would block indefinitely).
+        self._convert_proc    = None
         # Synchronous-prompt support: worker thread blocks on _prompt_event until JS replies
         self._prompt_event    = threading.Event()
         self._prompt_response = True
@@ -473,6 +478,7 @@ class API:
             "defaultVideoOutput": DEFAULT_VIDEO_OUT,
             "ffmpegFound":        ffmpeg is not None,
             "ffmpegPath":       str(ffmpeg / ("ffmpeg.exe" if sys.platform == "win32" else "ffmpeg")) if ffmpeg else "",
+            "pillowFound":        convert.pillow_available(),
             "autoFallback":     s.get("auto_fallback", True),
             "qobuzFormat":      s.get("qobuz_format", 6),
             "proxy":            s.get("proxy", ""),
@@ -623,6 +629,102 @@ class API:
         result = self._window.create_file_dialog(webview.FOLDER_DIALOG)
         return result[0] if result else ""
 
+    # ── Convert ───────────────────────────────────────────────────────────────
+
+    # Dialog filters per input category. "All files" must stay last so someone
+    # with an unusual extension is never locked out of their own file.
+    _FILE_TYPES = {
+        "audio": ("Audio (*.mp3;*.flac;*.wav;*.m4a;*.aac;*.ogg;*.opus;*.wma)",
+                  "All files (*.*)"),
+        "video": ("Video (*.mp4;*.mkv;*.webm;*.mov;*.avi;*.flv;*.wmv;*.m4v)",
+                  "All files (*.*)"),
+        "image": ("Images (*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.gif;*.ico;*.tif)",
+                  "All files (*.*)"),
+        "all":   ("Media (*.mp3;*.flac;*.wav;*.m4a;*.aac;*.ogg;*.opus;*.wma;"
+                  "*.mp4;*.mkv;*.webm;*.mov;*.avi;*.flv;*.wmv;*.m4v;"
+                  "*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.gif;*.ico)",
+                  "All files (*.*)"),
+    }
+
+    def pick_files(self, kind: str = "all") -> list:
+        """Multi-select file picker. Returns absolute paths, [] if cancelled."""
+        import webview
+        types = self._FILE_TYPES.get(kind, self._FILE_TYPES["all"])
+        try:
+            result = self._window.create_file_dialog(
+                webview.OPEN_DIALOG, allow_multiple=True, file_types=types)
+        except Exception:
+            # Some GTK/Qt backends reject file_types they can't parse; a
+            # picker with no filter beats no picker at all.
+            result = self._window.create_file_dialog(
+                webview.OPEN_DIALOG, allow_multiple=True)
+        return [str(p) for p in result] if result else []
+
+    def scan_convert_folder(self, folder: str, target: str,
+                            recursive: bool = False,
+                            out_dir: str = "", force: bool = False) -> dict:
+        """Collect convertible files from a folder for the Convert tab."""
+        folder = (folder or "").strip()
+        if not folder or not Path(folder).is_dir():
+            return {"ok": False, "msg": "That folder doesn't exist."}
+        if target not in convert.TARGETS:
+            return {"ok": False, "msg": "Pick a format to convert to first."}
+
+        r = convert.scan_dir(folder, target, recursive=bool(recursive),
+                             out_dir=out_dir, force=bool(force))
+        if r["over_cap"]:
+            return {"ok": False, "msg": (
+                f"Found more than {convert.SCAN_CAP} files to convert. "
+                f"Pick a sub-folder"
+                f"{', or turn off sub-folders' if recursive else ''}.")}
+        if not r["files"]:
+            if r["same_fmt"]:
+                return {"ok": False, "msg": (
+                    f"All {r['same_fmt']} file(s) there are already "
+                    f"{target.upper()}. Tick 'Re-encode same format' to "
+                    f"convert them anyway.")}
+            return {"ok": False, "msg": "No convertible files in that folder."}
+        return {"ok": True, "files": r["files"], "same_fmt": r["same_fmt"],
+                "total": r["total"]}
+
+    def start_convert(self, files: list, out_dir: str, target: str,
+                      quality, opts: dict = None) -> dict:
+        """Queue one conversion job covering every file in `files`."""
+        opts = dict(opts or {})          # comes from the renderer — copy it
+        files = [str(f) for f in (files or []) if str(f).strip()]
+        if not files:
+            return {"ok": False, "msg": "No files selected."}
+        if target not in convert.TARGETS:
+            return {"ok": False, "msg": "Pick a format to convert to."}
+
+        cat = convert.category_for_target(target)
+        if cat == "image":
+            if not convert.pillow_available():
+                return {"ok": False, "msg": "Image conversion needs Pillow "
+                                            "(pip install Pillow)."}
+        elif find_ffmpeg() is None:
+            return {"ok": False, "msg": "ffmpeg not found — conversion needs it."}
+
+        # Catch the impossible direction up front rather than failing every
+        # file individually once the job is already running.
+        src_cats = {convert.CATEGORY_OF_EXT.get(Path(f).suffix.lower(), "")
+                    for f in files}
+        if cat == "video" and src_cats and src_cats <= {"audio"}:
+            return {"ok": False, "msg": "Can't turn audio into video."}
+        if cat == "audio" and src_cats and src_cats <= {"image"}:
+            return {"ok": False, "msg": "Can't turn an image into audio."}
+
+        if out_dir:
+            try:
+                Path(out_dir).mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                return {"ok": False, "msg": f"Can't use that output folder: {e}"}
+
+        label = (Path(files[0]).name if len(files) == 1
+                 else f"{len(files)} files → {target.upper()}")
+        return self._enqueue("convert", label,
+                             (files, out_dir, target, quality, opts))
+
     # ── Download ──────────────────────────────────────────────────────────────
 
     def start_download(self, url: str, output_dir: str,
@@ -667,6 +769,15 @@ class API:
         pending items can be dropped with remove_job() instead.
         """
         self._abort_flag = True
+        # A conversion only notices the flag between ffmpeg progress lines, and
+        # a stalled encode emits none — so kill the process directly instead of
+        # leaving Abort looking like it did nothing.
+        proc = self._convert_proc
+        if proc is not None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
         with self._jobs_lock:
             for j in self._jobs:
                 if j["status"] == "pending":
@@ -955,7 +1066,9 @@ class API:
                 self._last_file    = ""
                 self._skip_history = False
                 self._push_queue()
-                fn = self._worker if job["kind"] == "audio" else self._worker_video
+                fn = {"audio":   self._worker,
+                      "video":   self._worker_video,
+                      "convert": self._worker_convert}[job["kind"]]
                 try:
                     fn(*job["args"])
                 except Exception:
@@ -1791,3 +1904,193 @@ class API:
             if debug_enabled():
                 debug_log(f"video error for {redact_url(url)}\n{traceback.format_exc()}")
             self._log(friendly_dl_error(msg) or f"ERROR: {msg}", "err")
+
+    # ── Convert worker ───────────────────────────────────────────────────────
+
+    def _worker_convert(self, files, output_dir, target, quality, opts):
+        """
+        Convert every file in one batch.
+
+        Deliberately one job for the whole batch rather than one per file: a
+        200-file folder would otherwise evict the entire download history
+        (history.MAX is 300), fill a queue widget that shows six rows, and fire
+        200 success banners. The cost is no per-file retry, so a failure here
+        is logged and counted and the batch carries on — only an entirely
+        fruitless batch is reported as failed.
+        """
+        ffmpeg_dir = find_ffmpeg()
+        ffmpeg_exe = str(ffmpeg_dir / ("ffmpeg.exe" if sys.platform == "win32"
+                                       else "ffmpeg")) if ffmpeg_dir else ""
+        cat        = convert.category_for_target(target)
+        collision  = str(opts.get("collision") or "rename")
+        force      = bool(opts.get("force"))
+        total      = len(files)
+        default_q  = convert.DEFAULT_QUALITY.get(target)
+        try:
+            quality_is_default = int(quality) == default_q
+        except (TypeError, ValueError):
+            quality_is_default = True
+
+        # Ask once, before any work, when the batch is big enough that somebody
+        # may have pointed this at the wrong folder. The UI must already be
+        # polling by now (startConvert calls beforeDownload first), or this
+        # prompt would sit unanswered until the 120s timeout.
+        if total > 25 and not self._ask_user(
+                f"Convert {total} files to {target.upper()}? "
+                f"This may take a while."):
+            self._log("Cancelled.", "warn")
+            self._abort_flag = True
+            return
+
+        plural = "s" if total != 1 else ""
+        self._log(f"Converting {total} file{plural} to {target.upper()}…",
+                  "bright")
+
+        done = failed = skipped = 0
+        for idx, src in enumerate(files, 1):
+            if self._abort_flag:
+                self._log("Aborted.", "warn")
+                break
+            src = Path(src)
+            self._emit("job_status",
+                       msg=f"Converting {idx} of {total}: {src.name}")
+
+            if not src.exists():
+                self._log(f"{src.name}: file is gone — skipped.", "warn")
+                skipped += 1
+                continue
+            if convert.is_same_format(src, target) and not force:
+                self._log(f"{src.name} is already {target.upper()} — skipped.",
+                          "dim")
+                skipped += 1
+                continue
+
+            try:
+                dst = convert.resolve_output(src, output_dir, target, collision)
+            except convert.SameFileError:
+                self._log(f"{src.name}: that would overwrite the file itself. "
+                          f"Choose a different output folder.", "err")
+                failed += 1
+                continue
+            if dst is None:
+                self._log(f"{src.name}: output exists — skipped.", "dim")
+                skipped += 1
+                continue
+
+            tmp = convert.temp_path(dst)
+            try:
+                ok = self._convert_one(ffmpeg_exe, src, dst, tmp, cat, target,
+                                       quality, opts, quality_is_default,
+                                       idx, total)
+            except Exception as exc:
+                if debug_enabled():
+                    debug_log(f"convert crashed on {src.name}\n"
+                              f"{traceback.format_exc()}")
+                self._log(f"{src.name}: {exc}", "err")
+                ok = False
+            finally:
+                # Never leave a half-written file wearing a real name.
+                try:
+                    if tmp.exists():
+                        tmp.unlink()
+                except OSError:
+                    pass
+
+            if ok:
+                done += 1
+                self._last_file = str(dst)
+            elif self._abort_flag:
+                break
+            else:
+                failed += 1
+
+        if self._abort_flag:
+            self._progress(0)
+            return
+
+        bits = [f"{done} converted"]
+        if failed:
+            bits.append(f"{failed} failed")
+        if skipped:
+            bits.append(f"{skipped} skipped")
+        summary = ", ".join(bits)
+        if done:
+            self._progress(100)
+            self._log(f"Done: {summary}.", "ok")
+            # Marks the job 'done' for the queue; without it the runner records
+            # the whole batch as failed.
+            self._emit("success", path=self._last_file)
+        elif not failed:
+            # Everything was skipped and nothing went wrong — that is the
+            # correct outcome for "convert this folder to mp3" on a folder
+            # that is already mp3, so it must not be reported as a failure.
+            self._progress(100)
+            self._log(f"Nothing to do — {summary}.", "info")
+            self._emit("success", path="")
+            self._skip_history = True
+        else:
+            self._log(f"Nothing converted ({summary}).", "err")
+
+    def _convert_one(self, ffmpeg_exe, src, dst, tmp, cat, target, quality,
+                     opts, quality_is_default, idx, total) -> bool:
+        """Convert a single file. Returns True on success."""
+        # Images never touch ffmpeg — Pillow handles ICO and animation, which
+        # ffmpeg either can't do or does badly.
+        if cat == "image":
+            self._progress((idx - 1) / total * 100)
+            note = convert.convert_image(src, tmp, target, quality, opts)
+            os.replace(tmp, dst)
+            self._log(f"{src.name} → {dst.name}"
+                      + (f" ({note})" if note else ""), "ok")
+            self._progress(idx / total * 100)
+            return True
+
+        info = convert.probe(ffmpeg_exe, src)
+        copy_v, copy_a = convert.can_stream_copy(target, info, opts,
+                                                 quality_is_default)
+
+        def on_pct(p):
+            # Scale this file's progress into the batch's share of the bar, so
+            # a 40-file batch fills the bar once rather than 40 times.
+            base = (idx - 1) / total * 100
+            span = 100 / total
+            self._progress(base + (span * (p / 100) if p is not None else 0))
+
+        cmd = convert.build_cmd(ffmpeg_exe, src, tmp, target, quality, opts,
+                                info, copy_v, copy_a)
+        rc, err = convert.run_ffmpeg(
+            cmd, info.get("duration", 0), on_pct=on_pct,
+            should_abort=lambda: self._abort_flag,
+            on_proc=lambda p: setattr(self, "_convert_proc", p))
+
+        # Any failure of a stream copy is retried as a full re-encode. ffmpeg
+        # words container/codec rejections too many ways to pattern-match, and
+        # the worst case is one wasted fast attempt.
+        if rc not in (0, -1) and (copy_v or copy_a) and not self._abort_flag:
+            self._log(f"{src.name}: fast copy not possible — re-encoding…",
+                      "warn")
+            cmd = convert.build_cmd(ffmpeg_exe, src, tmp, target, quality,
+                                    opts, info, False, False)
+            rc, err = convert.run_ffmpeg(
+                cmd, info.get("duration", 0), on_pct=on_pct,
+                should_abort=lambda: self._abort_flag,
+                on_proc=lambda p: setattr(self, "_convert_proc", p))
+
+        if rc == -1 or self._abort_flag:
+            self._log("Aborted.", "warn")
+            return False
+        if rc != 0 or not tmp.exists():
+            tail = (err or "").strip().splitlines()
+            detail = tail[-1] if tail else f"ffmpeg exited {rc}"
+            self._log(f"{src.name}: {detail}", "err")
+            if debug_enabled():
+                debug_log(f"convert failed: {' '.join(cmd)}\n{err}")
+            return False
+
+        os.replace(tmp, dst)
+        how = ("fast copy" if copy_v and copy_a
+               else "copied audio" if copy_a and cat == "audio"
+               else "")
+        self._log(f"{src.name} → {dst.name}" + (f" ({how})" if how else ""),
+                  "ok")
+        return True

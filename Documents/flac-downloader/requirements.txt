@@ -2,3 +2,7 @@ yt-dlp>=2024.1.0
 curl_cffi>=0.7
 rich>=13.0.0
 playwright>=1.40
+# Image conversion in the Convert tab, and cover-art re-encoding in utils.py.
+# utils.py treats it as optional (magic-byte fallback), but convert.py needs it
+# for real: ffmpeg has no ICO muxer and mangles animated GIF/WebP.
+Pillow>=10.0

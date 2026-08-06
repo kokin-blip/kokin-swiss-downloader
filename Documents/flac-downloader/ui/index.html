@@ -602,6 +602,16 @@ hr.separator {
 .test-result.ok  { color: green; }
 .test-result.err { color: red; }
 
+/* ── Convert specific ─────────────────────────────────────────────────────── */
+/* The window is a fixed 700x820, so the pane itself must never grow: it caps
+   here and scrolls internally, leaving the shared log/progress area below at
+   the same height it has on the Audio and Video tabs. */
+.convert-scroll { max-height: 404px; overflow-y: auto; padding-right: 4px; }
+#convFiles { max-height: 122px; }
+.conv-adv-row { display: flex; gap: 6px; align-items: center; margin-top: 4px; }
+.conv-adv-row label { flex: 0 0 92px; font-size: 10px; color: var(--win-dark); }
+.conv-adv-row input.form-control, .conv-adv-row select.form-control { width: 72px; }
+
 /* ── Misc ─────────────────────────────────────────────────────────────────── */
 .flex-row { display: flex; gap: 6px; align-items: center; }
 .spacer   { flex: 1; }
@@ -761,6 +771,7 @@ hr.separator {
   <div class="tab-strip">
     <button class="tab-btn active" id="tab-audio"    onclick="switchTab('audio')">Audio</button>
     <button class="tab-btn"        id="tab-video"    onclick="switchTab('video')">Video</button>
+    <button class="tab-btn"        id="tab-convert"  onclick="switchTab('convert')">Convert</button>
     <button class="tab-btn"        id="tab-settings" onclick="switchTab('settings')">Settings</button>
   </div>
   <div class="tab-border"></div>
@@ -945,6 +956,174 @@ hr.separator {
       </div>
 
     </div><!-- /pane-video -->
+
+    <!-- ── CONVERT TAB ───────────────────────────────────────────────────── -->
+    <div class="tab-pane" id="pane-convert">
+      <div class="convert-scroll">
+
+        <div class="form-group">
+          <label>Files <span class="label-sm">(audio · video · images)</span></label>
+          <div class="flex-row">
+            <button class="btn" onclick="convAddFiles()">Add Files…</button>
+            <button class="btn" onclick="convAddFolder()">Add Folder…</button>
+            <button class="btn" onclick="convClearFiles()" style="min-width:60px">Clear</button>
+            <label class="form-check" style="margin-left:4px">
+              <input type="checkbox" id="convRecursive"> <span class="label-sm">sub-folders</span>
+            </label>
+          </div>
+          <div class="search-results mt4" id="convFiles" style="display:none"></div>
+          <div class="label-sm mt4" id="convSummary">No files selected.</div>
+        </div>
+
+        <div class="form-group">
+          <label>Save to <span class="label-sm">(blank = next to each source file)</span></label>
+          <div class="input-group">
+            <input type="text" class="form-control" id="convOutDir" spellcheck="false" placeholder="(same folder as the source file)">
+            <button class="btn" onclick="browseFolder('convert')" style="min-width:70px">Browse…</button>
+          </div>
+        </div>
+
+        <div class="flex-row" style="gap:8px;align-items:flex-start">
+          <div class="form-group" style="flex:1;margin-bottom:0">
+            <label>Convert to</label>
+            <select class="form-control" id="convTarget" onchange="onConvertTargetChange()">
+              <optgroup label="Audio">
+                <option value="mp3" selected>MP3</option>
+                <option value="flac">FLAC</option>
+                <option value="wav">WAV</option>
+                <option value="m4a">M4A (AAC)</option>
+                <option value="aac">AAC</option>
+                <option value="ogg">OGG (Vorbis)</option>
+                <option value="opus">Opus</option>
+                <option value="wma">WMA</option>
+              </optgroup>
+              <optgroup label="Video">
+                <option value="mp4">MP4</option>
+                <option value="mkv">MKV</option>
+                <option value="webm">WebM</option>
+                <option value="mov">MOV</option>
+                <option value="avi">AVI</option>
+                <option value="gif">GIF (animated)</option>
+              </optgroup>
+              <optgroup label="Image">
+                <option value="png">PNG</option>
+                <option value="jpg">JPEG</option>
+                <option value="webp">WebP</option>
+                <option value="bmp">BMP</option>
+                <option value="imgif">GIF (still)</option>
+                <option value="ico">ICO (icon)</option>
+              </optgroup>
+            </select>
+          </div>
+          <div class="form-group" style="flex:2;margin-bottom:0">
+            <label><span id="convQualityRowLabel">Bitrate</span>
+                   <span class="label-sm" id="convQualityLabel">320 kbps</span></label>
+            <div class="flex-row" style="gap:6px">
+              <span class="label-sm" id="convQualityMin">0</span>
+              <input type="range" id="convQualitySlider" min="0" max="4" value="3"
+                     oninput="updateConvertQualityLabel(this.value)" style="flex:1;margin:0">
+              <span class="label-sm" id="convQualityMax">4</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="flex-row mt6" style="gap:14px">
+          <label class="form-check">
+            <input type="checkbox" id="convRemux" checked> Fast copy when possible
+            <span class="label-sm">(no re-encode)</span>
+          </label>
+          <label class="form-check">
+            <input type="checkbox" id="convForce"> Re-encode same format
+          </label>
+        </div>
+        <div class="flex-row mt4" style="gap:6px">
+          <span class="label-sm">If the file already exists:</span>
+          <select class="form-control" id="convCollision" style="width:auto">
+            <option value="rename" selected>Add a number</option>
+            <option value="overwrite">Overwrite it</option>
+            <option value="skip">Skip it</option>
+          </select>
+        </div>
+
+        <div class="flex-row mt6">
+          <button class="btn" id="btnConvAdv" onclick="toggleConvAdvanced()" style="min-width:110px">Advanced  ▸</button>
+        </div>
+
+        <fieldset id="convAdvanced" class="mt4" style="display:none">
+          <legend>Advanced</legend>
+          <div class="label-sm" style="margin-bottom:2px">
+            Blank = use the quality slider. Anything set here turns off fast copy.
+          </div>
+          <div class="conv-adv-row" id="advRowBitrate">
+            <label>Bitrate</label>
+            <input type="text" class="form-control" id="convAdvBitrate" placeholder="320" spellcheck="false">
+            <span class="label-sm">kbps</span>
+          </div>
+          <div class="conv-adv-row" id="advRowCrf">
+            <label>CRF</label>
+            <input type="text" class="form-control" id="convAdvCrf" placeholder="23" spellcheck="false">
+            <span class="label-sm">lower = better quality</span>
+          </div>
+          <div class="conv-adv-row" id="advRowSize">
+            <label>Size</label>
+            <input type="text" class="form-control" id="convAdvWidth" placeholder="width" spellcheck="false">
+            <span class="label-sm">×</span>
+            <input type="text" class="form-control" id="convAdvHeight" placeholder="height" spellcheck="false">
+            <span class="label-sm">blank = keep ratio</span>
+          </div>
+          <div class="conv-adv-row" id="advRowFps">
+            <label>Frame rate</label>
+            <input type="text" class="form-control" id="convAdvFps" placeholder="30" spellcheck="false">
+            <span class="label-sm">fps</span>
+          </div>
+          <div class="conv-adv-row" id="advRowAudio">
+            <label>Sample rate</label>
+            <input type="text" class="form-control" id="convAdvSampleRate" placeholder="44100">
+            <span class="label-sm">Hz</span>
+            <label style="flex:0 0 auto;margin-left:8px">Channels</label>
+            <select class="form-control" id="convAdvChannels">
+              <option value="0" selected>keep</option>
+              <option value="1">mono</option>
+              <option value="2">stereo</option>
+            </select>
+          </div>
+          <div class="conv-adv-row" id="advRowTrim">
+            <label>Trim</label>
+            <input type="text" class="form-control" id="convAdvTrimStart" placeholder="0:00">
+            <span class="label-sm">to</span>
+            <input type="text" class="form-control" id="convAdvTrimEnd" placeholder="1:30">
+          </div>
+          <div class="conv-adv-row" id="advRowGifSecs">
+            <label>Max length</label>
+            <input type="text" class="form-control" id="convAdvGifSeconds" placeholder="30">
+            <span class="label-sm">seconds</span>
+          </div>
+          <div class="conv-adv-row" id="advRowIco">
+            <label>Icon size</label>
+            <select class="form-control" id="convAdvIcoSize">
+              <option value="256" selected>256</option>
+              <option value="128">128</option>
+              <option value="64">64</option>
+              <option value="48">48</option>
+              <option value="32">32</option>
+              <option value="16">16</option>
+            </select>
+            <span class="label-sm">px</span>
+          </div>
+          <div class="conv-adv-row" id="advRowArt">
+            <label>&nbsp;</label>
+            <label class="form-check" style="flex:1">
+              <input type="checkbox" id="convKeepArt" checked> Keep cover art
+            </label>
+          </div>
+        </fieldset>
+
+        <div class="flex-row mt6">
+          <button class="btn" id="btnConvert" onclick="startConvert()" style="min-width:110px;font-weight:bold">Convert</button>
+        </div>
+
+      </div>
+    </div><!-- /pane-convert -->
 
     <!-- ── SETTINGS TAB ──────────────────────────────────────────────────── -->
     <div class="tab-pane full-height" id="pane-settings">
@@ -1187,10 +1366,11 @@ function switchTab(name) {
   document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
   document.getElementById('tab-' + name).classList.add('active');
   document.getElementById('pane-' + name).classList.add('active');
-  // Output (log/progress/provider) is shared between audio+video, hidden on settings
+  // Output (log/progress/provider) is shared by every tab that runs jobs,
+  // hidden on settings
   const out = document.getElementById('outputArea');
-  if (name === 'audio' || name === 'video') out.classList.add('active');
-  else                                       out.classList.remove('active');
+  if (name === 'audio' || name === 'video' || name === 'convert') out.classList.add('active');
+  else                                                            out.classList.remove('active');
 }
 
 // ── Audio format / quality ────────────────────────────────────────────────────
@@ -1232,6 +1412,209 @@ function onAudioFormatChange() {
 function updateQualityLabel(v) {
   const fmt = document.getElementById('audioFormat').value;
   document.getElementById('qualityLabel').textContent = AUDIO_QUALITY_CONFIGS[fmt].fmt(v);
+}
+
+// ── Convert tab ───────────────────────────────────────────────────────────────
+// Same {min,max,def,row,fmt} shape as AUDIO_QUALITY_CONFIGS above. The encoder
+// settings these map to live in convert.py — change one, change both.
+// VQ and GIF_PRESETS are referenced eagerly below, so they must be declared
+// first (unlike MP3_BITRATES, which is only read inside arrow functions).
+const VQ = { min: 0, max: 4, def: 2, row: 'Video quality',
+             fmt: v => ['Smallest file','Small','Balanced (default)','High','Visually lossless'][v] };
+const GIF_PRESETS = ['8 fps · 320 px','10 fps · 480 px','12 fps · 480 px','15 fps · 640 px','20 fps · 720 px'];
+
+const CONVERT_QUALITY = {
+  // audio
+  mp3:  { min: 0, max: 4,  def: 3, row: 'Bitrate', fmt: v => MP3_BITRATES[v] },
+  m4a:  { min: 0, max: 4,  def: 3, row: 'Bitrate', fmt: v => MP3_BITRATES[v] },
+  aac:  { min: 0, max: 4,  def: 3, row: 'Bitrate', fmt: v => MP3_BITRATES[v] },
+  wma:  { min: 0, max: 4,  def: 3, row: 'Bitrate', fmt: v => MP3_BITRATES[v] },
+  opus: { min: 0, max: 4,  def: 3, row: 'Bitrate', fmt: v => OPUS_BITRATES[v] },
+  ogg:  { min: 3, max: 10, def: 7, row: 'Vorbis quality',
+          fmt: v => v + ' (~' + Math.round([0,0,0,112,128,160,192,224,256,320,500][v]||0) + ' kbps)' },
+  flac: { min: 0, max: 12, def: 5, row: 'FLAC compression',
+          fmt: v => v === '0' ? '0 — fastest / largest file'
+                  : v === '5' ? '5 — balanced (default)'
+                  : v === '12'? '12 — best compression / slowest'
+                  : v },
+  wav:  { min: 0, max: 0,  def: 0, row: 'Quality', fmt: () => 'uncompressed (16-bit PCM)' },
+  // video
+  mp4: VQ, mkv: VQ, mov: VQ, webm: VQ, avi: VQ,
+  gif:  { min: 0, max: 4,  def: 2, row: 'GIF quality', fmt: v => GIF_PRESETS[v] },
+  // image
+  jpg:  { min: 1, max: 100, def: 90, row: 'JPEG quality',
+          fmt: v => v + (v >= 95 ? ' (near-lossless)' : v >= 85 ? ' (recommended)'
+                       : v >= 70 ? ' (smaller file)' : ' (visible artifacts)') },
+  webp: { min: 1, max: 100, def: 85, row: 'WebP quality',
+          fmt: v => v === '100' ? '100 (lossless)' : v },
+  png:  { min: 0, max: 9,   def: 6,  row: 'PNG compression',
+          fmt: v => v + (v === '0' ? ' — none / fastest' : v === '9' ? ' — max / slowest' : '') },
+  bmp:  { min: 0, max: 0, def: 0, row: 'Quality', fmt: () => 'uncompressed' },
+  imgif:{ min: 0, max: 0, def: 0, row: 'Quality', fmt: () => '256-colour palette' },
+  ico:  { min: 0, max: 0, def: 0, row: 'Quality', fmt: () => 'lossless' },
+};
+
+// Which Advanced rows make sense per target. Showing a sample rate box for a
+// PNG, or a CRF box for an MP3, just invites people to fill in fields that do
+// nothing.
+const CONVERT_CAT = {
+  mp3:'audio', flac:'audio', wav:'audio', m4a:'audio', aac:'audio',
+  ogg:'audio', opus:'audio', wma:'audio',
+  mp4:'video', mkv:'video', webm:'video', mov:'video', avi:'video', gif:'video',
+  png:'image', jpg:'image', webp:'image', bmp:'image', imgif:'image', ico:'image',
+};
+
+let _convFiles = [];
+
+function convTarget() { return document.getElementById('convTarget').value; }
+
+function onConvertTargetChange() {
+  const t   = convTarget();
+  const cfg = CONVERT_QUALITY[t];
+  const slider = document.getElementById('convQualitySlider');
+  slider.min   = cfg.min;
+  slider.max   = cfg.max;
+  slider.value = cfg.def;
+  slider.disabled = (cfg.min === cfg.max);
+  document.getElementById('convQualityMin').textContent = cfg.min;
+  document.getElementById('convQualityMax').textContent = cfg.max;
+  document.getElementById('convQualityRowLabel').textContent = cfg.row;
+  updateConvertQualityLabel(slider.value);
+  applyConvAdvVisibility();
+  renderConvFiles();   // the summary line names the target
+}
+
+function updateConvertQualityLabel(v) {
+  document.getElementById('convQualityLabel').textContent =
+    CONVERT_QUALITY[convTarget()].fmt(v);
+}
+
+function toggleConvAdvanced() {
+  const p  = document.getElementById('convAdvanced');
+  const on = p.style.display === 'none';
+  p.style.display = on ? '' : 'none';
+  document.getElementById('btnConvAdv').textContent = on ? 'Advanced  ▾' : 'Advanced  ▸';
+}
+
+function applyConvAdvVisibility() {
+  const t   = convTarget();
+  const cat = CONVERT_CAT[t];
+  const show = (id, on) => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = on ? '' : 'none';
+  };
+  // Lossless targets have no bitrate to set — FLAC takes a compression level
+  // and WAV is raw PCM, so the field would be quietly ignored.
+  show('advRowBitrate',  cat === 'audio' && t !== 'wav' && t !== 'flac');
+  show('advRowCrf',      cat === 'video' && t !== 'gif');
+  show('advRowSize',     cat !== 'audio');
+  show('advRowFps',      cat === 'video');
+  show('advRowAudio',    cat === 'audio');
+  show('advRowTrim',     cat !== 'image');
+  show('advRowGifSecs',  t === 'gif');
+  show('advRowIco',      t === 'ico');
+  // Must match the containers build_cmd() will actually attach a picture to.
+  show('advRowArt',      t === 'mp3' || t === 'flac' || t === 'm4a');
+}
+
+// ── Convert: file list ────────────────────────────────────────────────────────
+function convAddPaths(list) {
+  // Dedupe case-insensitively — Windows paths differing only in case are the
+  // same file, and adding it twice would convert it twice.
+  const seen = new Set(_convFiles.map(f => f.path.toLowerCase()));
+  let added = 0;
+  (list || []).forEach(f => {
+    const path = typeof f === 'string' ? f : f.path;
+    if (!path || seen.has(path.toLowerCase())) return;
+    seen.add(path.toLowerCase());
+    _convFiles.push({
+      path: path,
+      name: (typeof f === 'object' && f.name) ? f.name : path.split(/[\\/]/).pop(),
+      size: (typeof f === 'object' && f.size) ? f.size : 0,
+    });
+    added++;
+  });
+  renderConvFiles();
+  return added;
+}
+
+async function convAddFiles() {
+  const paths = await api('pick_files', 'all');
+  if (!paths || !paths.length) return;
+  const n = convAddPaths(paths);
+  if (n === 0) appendLog('Those files are already in the list.', 'dim');
+}
+
+async function convAddFolder() {
+  const folder = await api('browse_folder');
+  if (!folder) return;
+  const r = await api('scan_convert_folder', folder, convTarget(),
+                      document.getElementById('convRecursive').checked,
+                      document.getElementById('convOutDir').value.trim(),
+                      document.getElementById('convForce').checked);
+  if (!r.ok) { appendLog(r.msg, 'err'); setStatus('Ready'); return; }
+  const n = convAddPaths(r.files);
+  let msg = 'Added ' + n + ' file' + (n === 1 ? '' : 's') + ' from ' + folder;
+  if (r.same_fmt) msg += ' (' + r.same_fmt + ' already ' + convTarget().toUpperCase() + ')';
+  appendLog(msg, 'info');
+}
+
+function convRemove(i) { _convFiles.splice(i, 1); renderConvFiles(); }
+function convClearFiles() { _convFiles = []; renderConvFiles(); }
+
+function renderConvFiles() {
+  const box = document.getElementById('convFiles');
+  box.style.display = _convFiles.length ? '' : 'none';
+  // innerHTML concat like every other list here, so escaping is not optional:
+  // a file called <img onerror=…>.mp3 is a legal filename.
+  box.innerHTML = _convFiles.map((f, i) =>
+    '<div class="search-row">' +
+      '<span class="search-title" title="' + escapeAttr(f.path) + '">' + escapeHtml(f.name) + '</span>' +
+      '<span class="search-meta">' + (f.size ? fmtBytes(f.size) : '') + '</span>' +
+      '<span class="queue-x" onclick="convRemove(' + i + ')" title="Remove">✕</span>' +
+    '</div>').join('');
+  const n = _convFiles.length;
+  document.getElementById('convSummary').textContent = n
+    ? n + ' file' + (n === 1 ? '' : 's') + ' → ' + convTarget().toUpperCase()
+    : 'No files selected.';
+}
+
+// ── Convert: run ──────────────────────────────────────────────────────────────
+function convOpts() {
+  const val = id => document.getElementById(id).value.trim();
+  return {
+    remux:      document.getElementById('convRemux').checked,
+    force:      document.getElementById('convForce').checked,
+    collision:  document.getElementById('convCollision').value,
+    keepArt:    document.getElementById('convKeepArt').checked,
+    bitrate:    val('convAdvBitrate'),
+    crf:        val('convAdvCrf'),
+    width:      val('convAdvWidth'),
+    height:     val('convAdvHeight'),
+    fps:        val('convAdvFps'),
+    sampleRate: val('convAdvSampleRate'),
+    channels:   document.getElementById('convAdvChannels').value,
+    trimStart:  val('convAdvTrimStart'),
+    trimEnd:    val('convAdvTrimEnd'),
+    gifSeconds: val('convAdvGifSeconds'),
+    icoSize:    document.getElementById('convAdvIcoSize').value,
+  };
+}
+
+async function startConvert() {
+  if (!_convFiles.length) { appendLog('Add some files first.', 'err'); return; }
+  clearLog();
+  const r = await api('start_convert',
+                      _convFiles.map(f => f.path),
+                      document.getElementById('convOutDir').value.trim(),
+                      convTarget(),
+                      parseInt(document.getElementById('convQualitySlider').value, 10),
+                      convOpts());
+  if (!r.ok) { appendLog(r.msg, 'err'); return; }
+  // Must follow start_convert, not precede it: a batch over 25 files asks the
+  // user a question from the worker thread, and that prompt only reaches the
+  // UI through the polling this starts.
+  beforeDownload('convert');
 }
 
 // ── Log ───────────────────────────────────────────────────────────────────────
@@ -1315,7 +1698,7 @@ function setStatus(msg) {
 async function browseFolder(which) {
   const folder = await api('browse_folder');
   if (!folder) return;
-  const target = which === 'video' ? 'outputDirVideo' : 'outputDir';
+  const target = {video: 'outputDirVideo', convert: 'convOutDir'}[which] || 'outputDir';
   document.getElementById(target).value = folder;
 }
 
@@ -1363,7 +1746,13 @@ function beforeDownload(kind) {
   document.getElementById('btnAbort').disabled = false;
   resetProviders();
   pulseProgress();
-  setStatus(kind === 'video' ? 'Downloading video…' : 'Downloading…');
+  setStatus(kind === 'convert' ? 'Converting…'
+          : kind === 'video'   ? 'Downloading video…'
+          : 'Downloading…');
+  // Convert is the exception to the above: the file list is a single shared
+  // pile, so a second batch queued mid-run would silently reconvert whatever
+  // is still sitting in it.
+  if (kind === 'convert') document.getElementById('btnConvert').disabled = true;
   startPolling();
 }
 
@@ -1489,6 +1878,13 @@ async function revealFile(path) {
   if (!r.ok) appendLog(r.msg, 'warn');
 }
 function redownload(url, kind) {
+  // A conversion's history "url" is a label like "12 files → MP3", not a path,
+  // so there is nothing to re-run from — send them to the tab instead.
+  if (kind === 'convert') {
+    switchTab('convert');
+    appendLog('That was a conversion — pick the files again to repeat it.', 'info');
+    return;
+  }
   // Drop the URL back into the right tab and let the user hit Download, rather
   // than silently starting a job from a panel they're only browsing.
   switchTab(kind === 'video' ? 'video' : 'audio');
@@ -1539,6 +1935,8 @@ const QUEUE_BADGE = {
   failed:    ['✗', 'failed'],
   cancelled: ['—', 'cancelled'],
 };
+// .queue-kind is 34px wide, so 'convert' would be clipped — 'conv' fits.
+const QUEUE_KIND = { audio: 'audio', video: 'video', convert: 'conv' };
 
 function renderQueue(jobs) {
   const wrap = document.getElementById('queueWrap');
@@ -1561,7 +1959,7 @@ function renderQueue(jobs) {
         : '<span class="queue-x" style="visibility:hidden">×</span>';
     return `<div class="queue-row ${j.status}">` +
              `<span class="queue-badge" title="${title}">${badge}</span>` +
-             `<span class="queue-kind">${j.kind === 'video' ? 'video' : 'audio'}</span>` +
+             `<span class="queue-kind">${QUEUE_KIND[j.kind] || j.kind}</span>` +
              `<span class="queue-url" title="${escapeAttr(j.url)}">${escapeHtml(j.url)}</span>` +
              action +
            '</div>';
@@ -1615,6 +2013,7 @@ async function pollUpdates() {
     else if (u.kind === 'success')          showSuccessStar();
     else if (u.kind === 'prompt')           showPrompt(u.question);
     else if (u.kind === 'album_progress')   setStatus(`Album: track ${u.current} of ${u.total}…`);
+    else if (u.kind === 'job_status')       setStatus(u.msg);
     else if (u.kind === 'queue')            renderQueue(u.jobs || []);
     else if (u.kind === 'history')          { if (_qhPanel === 'history') renderHistory(u.entries || []); }
     else if (u.kind === 'login_state') {
@@ -1626,6 +2025,7 @@ async function pollUpdates() {
       stopPolling();
       document.getElementById('btnDownloadAudio').disabled = false;
       document.getElementById('btnDownloadVideo').disabled = false;
+      document.getElementById('btnConvert').disabled       = false;
       document.getElementById('btnAbort').disabled         = true;
       setStatus('Ready');
     }
@@ -1777,6 +2177,13 @@ async function init() {
 
   // Initialize audio format slider
   onAudioFormatChange();
+  // Same for the Convert tab's target/quality pairing, which also lays out
+  // which Advanced rows apply.
+  onConvertTargetChange();
+  if (!d.pillowFound) {
+    appendLog('Pillow is missing — image conversion is unavailable ' +
+              '(pip install Pillow).', 'warn');
+  }
 
   // Queue + saved sign-ins survive a reload of the UI, so show what's there.
   refreshQueue();

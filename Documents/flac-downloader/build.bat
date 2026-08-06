@@ -43,6 +43,7 @@ pyinstaller ^
   --collect-all mutagen ^
   --collect-all curl_cffi ^
   --collect-all playwright ^
+  --collect-all PIL ^
   --icon icon.ico ^
   app.py
 

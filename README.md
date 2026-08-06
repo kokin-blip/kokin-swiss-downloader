@@ -1,7 +1,8 @@
 # Kokin's Swiss Downloader
 
-A Windows desktop app for downloading music and video, with a Win95-styled UI.
-Point it at a URL, pick a format, hit go.
+A Windows desktop app for downloading music and video — and converting media
+files you already have — with a Win95-styled UI. Point it at a URL or a folder,
+pick a format, hit go.
 
 Music downloads aim for **lossless FLAC** and fall back through several sources
 before giving up. Video downloads run on yt-dlp, with a real-browser fallback
@@ -78,6 +79,36 @@ Three fallbacks make this work on sites plain yt-dlp fails on:
   credentials.
 
 DRM-protected video (Widevine) is not supported and won't be.
+
+### Convert
+
+The **Convert** tab works on files you already have — no URL involved. Add
+individual files or point it at a whole folder, pick a target format, and it
+runs the batch through the same queue, progress bar and log as a download.
+
+- **Audio** — MP3, FLAC, WAV, M4A, AAC, OGG, Opus, WMA
+- **Video** — MP4, MKV, WebM, MOV, AVI, and animated GIF
+- **Extract audio** from any video, by picking an audio format for a video file
+- **Images** — PNG, JPEG, WebP, BMP, GIF, ICO
+
+Converting a folder to an audio format sweeps up its videos too, since ripping
+the audio out of them is usually the point; converting to a video or image
+format stays in its lane. Sub-folders are opt-in.
+
+Two things it does on its own:
+
+- **Fast copy** — changing only the container (MKV → MP4 on H.264/AAC, say)
+  repackages the streams instead of re-encoding them, which takes about a
+  second instead of twenty minutes and loses nothing. It falls back to a real
+  re-encode automatically when the streams don't fit the new container.
+- **Skipping no-ops** — files already in the target format are left alone
+  rather than re-encoded into a worse copy of themselves. Tick *Re-encode same
+  format* when that's genuinely what you want.
+
+Anything half-written is cleaned up rather than left wearing a real filename,
+and Abort stops the encode immediately. **Advanced** exposes bitrate/CRF,
+resolution, frame rate, sample rate, channels and trimming; anything set there
+turns off fast copy, since you can't rescale and stream-copy at once.
 
 ### Settings
 
@@ -169,6 +200,7 @@ python grab.py --headful "https://site/watch/whatever/"
 |---|---|
 | `app.py` | entry point; creates the pywebview window |
 | `backend.py` | the API exposed to JS — download workers, provider chain, browser grab |
+| `convert.py` | the Convert tab's engine — format registry, ffmpeg driver, Pillow image path |
 | `providers.py` | Qobuz, Odesli, MusicBrainz, spotiflac, cover-art lookups |
 | `ui/index.html` | the entire front end |
 | `utils.py` | ffmpeg discovery, FLAC tagging, debug log, notifications |

@@ -55,7 +55,7 @@ def add(kind: str, url: str, status: str,
     """Record one finished download. Returns the entry that was stored."""
     entry = {
         "ts":     int(time.time()),
-        "kind":   kind,          # 'audio' | 'video'
+        "kind":   kind,          # 'audio' | 'video' | 'convert'
         "url":    url,
         "status": status,        # 'done' | 'failed' | 'cancelled'
         "title":  title or "",
