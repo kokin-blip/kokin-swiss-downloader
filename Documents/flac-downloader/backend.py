@@ -454,10 +454,17 @@ def _op_fit(exe, src, out_dir, params, **cb) -> dict:
                               target_mb=params.get("target_mb", 25.0), **cb)
 
 
-_MEDIAOPS = {"clip": _op_clip, "sheet": _op_sheet, "fit": _op_fit}
+def _op_loudnorm(exe, src, out_dir, params, on_stage=None, **cb) -> dict:
+    return mediaops.normalize(exe, src, out_dir,
+                              preset=params.get("preset", "streaming"),
+                              on_stage=on_stage, **cb)
+
+
+_MEDIAOPS = {"clip": _op_clip, "sheet": _op_sheet, "fit": _op_fit,
+             "loudnorm": _op_loudnorm}
 
 _MEDIAOP_VERB = {"clip": "Cutting", "sheet": "Building a contact sheet for",
-                 "fit": "Shrinking"}
+                 "fit": "Shrinking", "loudnorm": "Levelling"}
 
 
 def _clock(secs: float) -> str:
@@ -1326,6 +1333,24 @@ class API:
         return self._enqueue("fit", f"under {target_mb} MB ← {p.name}",
                              ("fit", str(p), out_dir,
                               {"target_mb": float(target_mb)}))
+
+    def export_normalize(self, path: str, preset: str = "streaming",
+                         out_dir: str = "") -> dict:
+        """Queue a two-pass loudness normalisation."""
+        p = Path(path or "")
+        if not p.is_file():
+            return {"ok": False, "msg": "That file is no longer there."}
+        preset = str(preset or "streaming").lower()
+        if preset not in convert.LOUDNORM_PRESETS:
+            return {"ok": False, "msg": "Unknown loudness target."}
+        return self._enqueue("loudnorm", f"level ← {p.name}",
+                             ("loudnorm", str(p), out_dir, {"preset": preset}))
+
+    def loudness_presets(self) -> dict:
+        """The presets and their targets, so the UI never hardcodes a number."""
+        return {"ok": True,
+                "presets": [{"name": n, "i": v[0], "tp": v[1], "lra": v[2]}
+                            for n, v in convert.LOUDNORM_PRESETS.items()]}
 
     def _worker_mediaop(self, op: str, src: str, out_dir: str, params: dict):
         """
@@ -2556,7 +2581,13 @@ class API:
             self._progress(idx / total * 100)
             return True
 
-        info = convert.probe(ffmpeg_exe, src)
+        # Normalising needs the source's sample rate and bit depth, which
+        # probe() doesn't carry — without the rate, loudnorm's -af omits
+        # aresample and writes a 192 kHz file roughly 4x the size. Same
+        # subprocess cost either way; the difference is only in the parsing.
+        normalising = bool(convert.loudnorm_preset(opts))
+        info = (convert.probe_full(ffmpeg_exe, src) if normalising
+                else convert.probe(ffmpeg_exe, src))
         copy_v, copy_a = convert.can_stream_copy(target, info, opts,
                                                  quality_is_default)
 
@@ -2566,6 +2597,25 @@ class API:
             base = (idx - 1) / total * 100
             span = 100 / total
             self._progress(base + (span * (p / 100) if p is not None else 0))
+
+        if normalising:
+            self._log(f"{src.name}: measuring loudness…", "info")
+            measured = convert.measure_loudness(
+                ffmpeg_exe, src, convert.loudnorm_preset(opts),
+                info.get("duration", 0),
+                on_pct=lambda p: on_pct(p * 0.3 if p is not None else None),
+                should_abort=lambda: self._abort_flag,
+                on_proc=lambda p: setattr(self, "_convert_proc", p))
+            if self._abort_flag:
+                self._log("Aborted.", "warn")
+                return False
+            if not measured:
+                self._log(f"{src.name}: couldn't measure it — levelling by "
+                          f"estimate instead.", "warn")
+            # One opts dict serves all 40 files in a batch. Rebinding rather
+            # than assigning into it keeps this file's measurement out of the
+            # next file's command.
+            opts = {**opts, "loudnormMeasured": measured}
 
         cmd = convert.build_cmd(ffmpeg_exe, src, tmp, target, quality, opts,
                                 info, copy_v, copy_a)

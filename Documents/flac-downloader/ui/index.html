@@ -1315,6 +1315,16 @@ hr.separator {
               <option value="2">stereo</option>
             </select>
           </div>
+          <div class="conv-adv-row" id="advRowLoudness">
+            <label>Loudness</label>
+            <select class="form-control" id="convAdvLoudnorm" style="flex:1 1 auto">
+              <option value="" selected>leave alone</option>
+              <option value="streaming">even out — streaming (-14 LUFS)</option>
+              <option value="broadcast">even out — broadcast (-23 LUFS)</option>
+              <option value="loud">even out — loud (-9 LUFS)</option>
+            </select>
+            <span class="label-sm" style="flex:0 0 auto">measures first, so it can't stream-copy</span>
+          </div>
           <div class="conv-adv-row" id="advRowTrim">
             <label>Trim</label>
             <input type="text" class="form-control" id="convAdvTrimStart" placeholder="0:00">
@@ -1402,6 +1412,7 @@ hr.separator {
           <button class="btn" id="histTabClip"   onclick="histPanel('clip')">Clip</button>
           <button class="btn" id="histTabSheet"  onclick="histPanel('sheet')">Sheet</button>
           <button class="btn" id="histTabFit"    onclick="histPanel('fit')">Shrink</button>
+          <button class="btn" id="histTabLevel"  onclick="histPanel('level')">Level</button>
           <button class="btn" id="histTabFrames" onclick="histPanel('frames')">Frames</button>
           <!-- Not a panel: tags open a modal, because eight fields plus cover
                art will not fit in the strip under the player. -->
@@ -1464,6 +1475,18 @@ hr.separator {
           <button class="btn" onclick="histFitPreset(25)" title="Gmail, Discord Nitro Basic">25</button>
           <button class="btn" onclick="histFitPreset(50)">50</button>
           <button class="btn" id="histFitBtn" onclick="histExportFit()">Shrink</button>
+        </div>
+
+        <!-- Panel: loudness normalisation. Writes a new "_normalized" file in
+             the source's own format; the original is never touched. -->
+        <div class="hist-panel" id="histPanelLevel" style="display:none">
+          <span class="label-sm">Even out to</span>
+          <select class="form-control" id="histLevelPreset" style="flex:1 1 auto">
+            <option value="streaming" selected>streaming (-14 LUFS)</option>
+            <option value="broadcast">broadcast (-23 LUFS)</option>
+            <option value="loud">loud (-9 LUFS)</option>
+          </select>
+          <button class="btn" id="histLevelBtn" onclick="histNormalize()">Even out</button>
         </div>
 
         <!-- Panel: bulk frame extraction. -->
@@ -1974,6 +1997,7 @@ function convOpts() {
     fps:        val('convAdvFps'),
     sampleRate: val('convAdvSampleRate'),
     channels:   document.getElementById('convAdvChannels').value,
+    loudnorm:   document.getElementById('convAdvLoudnorm').value,
     trimStart:  val('convAdvTrimStart'),
     trimEnd:    val('convAdvTrimEnd'),
     gifSeconds: val('convAdvGifSeconds'),
@@ -2233,7 +2257,8 @@ function fmtBytes(n) {
 // not something that can be re-run from a URL. Anything listed here gets no ↻
 // and never reaches the download tabs — otherwise the button pastes a
 // sentence into the Audio URL box.
-const LOCAL_KINDS = new Set(['convert', 'frames', 'clip', 'sheet', 'fit']);
+const LOCAL_KINDS = new Set(['convert', 'frames', 'clip', 'sheet', 'fit',
+                             'loudnorm']);
 
 function fmtClock(s, withCentis) {
   if (!isFinite(s) || s < 0) s = 0;
@@ -2374,6 +2399,7 @@ const HIST_PANELS = {
   clip:   {tab: 'histTabClip',   el: 'histPanelClip',   kinds: ['video', 'audio']},
   sheet:  {tab: 'histTabSheet',  el: 'histPanelSheet',  kinds: ['video']},
   fit:    {tab: 'histTabFit',    el: 'histPanelFit',    kinds: ['video']},
+  level:  {tab: 'histTabLevel',  el: 'histPanelLevel',  kinds: ['video', 'audio']},
   frames: {tab: 'histTabFrames', el: 'histPanelFrames', kinds: ['video']},
 };
 
@@ -3031,6 +3057,25 @@ async function histExportFit() {
   startPolling();
 }
 
+async function histNormalize() {
+  const e = histCurrent();
+  if (!e) return;
+  const hint = document.getElementById('histXHint');
+  const preset = document.getElementById('histLevelPreset').value;
+
+  const r = await api('export_normalize', e.path, preset, '');
+  if (!r.ok) {
+    hint.textContent = r.msg || "Couldn't start.";
+    hint.style.color = '#aa6600';
+    return;
+  }
+  histBusy(true);
+  // Two passes over the whole file, so set the expectation before it starts.
+  hint.textContent = 'Measuring, then levelling — it reads the file twice…';
+  hint.style.color = '';
+  startPolling();
+}
+
 // ── Automatic frame extraction ────────────────────────────────────────────────
 
 const HIST_MODES = {
@@ -3139,6 +3184,7 @@ const LOCAL_KIND_HINT = {
   clip:    ['history', 'That was a clip — pick the video again to cut another.'],
   sheet:   ['history', 'That was a contact sheet — pick the video again to rebuild it.'],
   fit:     ['history', 'That was a resize — pick the video again to redo it.'],
+  loudnorm: ['history', 'That was a levelling — pick the file again to redo it.'],
 };
 
 function redownload(url, kind) {
@@ -3204,7 +3250,8 @@ const QUEUE_BADGE = {
 // Every job kind needs an entry; a missing one prints the raw kind and
 // overflows the badge.
 const QUEUE_KIND = { audio: 'audio', video: 'video', convert: 'conv',
-                     clip: 'clip', sheet: 'sheet', fit: 'size' };
+                     clip: 'clip', sheet: 'sheet', fit: 'size',
+                     loudnorm: 'level' };
 
 function renderQueue(jobs) {
   const wrap = document.getElementById('queueWrap');

@@ -12,6 +12,7 @@ Two engines live here, picked by target category:
   * Pillow for images — ffmpeg has no ICO muxer and mangles animated GIF/WebP
 """
 
+import json
 import os
 import re
 import subprocess
@@ -342,6 +343,8 @@ _RE_STREAM_LINE = re.compile(
 _RE_DIMS = re.compile(r"(?<![\dA-Fa-fxX])(\d{2,5})x(\d{2,5})(?![\dA-Fa-fxX])")
 _RE_FPS = re.compile(r"(\d+(?:\.\d+)?)\s*fps")
 _RE_HZ = re.compile(r"(\d+)\s*Hz")
+# s16 / s32 / fltp / u8 ... — the sample format token on an audio stream line.
+_RE_SAMPLE_FMT = re.compile(r"\b(u8|s16|s32|s64|flt|dbl)(p?)\b")
 _RE_PIXFMT = re.compile(
     r"\b(yuvj?[0-9]{3}[a-z0-9]*|gbrp[a-z0-9]*|rgb[a-z0-9]*|bgr[a-z0-9]*"
     r"|gray[a-z0-9]*|nv[0-9]+|p0[0-9]{2}[a-z0-9]*)\b")
@@ -384,7 +387,7 @@ def probe_full(ffmpeg_exe: str, path) -> dict:
         "vcodec": "", "vprofile": "", "width": 0, "height": 0, "fps": 0.0,
         "vbitrate": 0, "pix_fmt": "",
         "acodec": "", "aprofile": "", "sample_rate": 0, "channels": 0,
-        "abitrate": 0,
+        "abitrate": 0, "sample_fmt": "",
     }
     err = _probe_stderr(ffmpeg_exe, path)
     if not err:
@@ -436,6 +439,9 @@ def probe_full(ffmpeg_exe: str, path) -> dict:
             out["acodec"], out["aprofile"] = codec, profile
             out["sample_rate"] = _first_int(_RE_HZ, rest)
             out["abitrate"] = _first_int(_RE_KBPS, rest) * 1000
+            sf = _RE_SAMPLE_FMT.search(rest)
+            if sf:
+                out["sample_fmt"] = sf.group(1) + sf.group(2)
             for field in (x.strip().lower() for x in rest.split(",")):
                 if field in _CHANNEL_NAMES:
                     out["channels"] = _CHANNEL_NAMES[field]
@@ -486,6 +492,12 @@ def _has_reencode_override(opts: dict) -> bool:
     for k in ("bitrate", "crf", "trimStart", "trimEnd"):
         if str(opts.get(k) or "").strip():
             return True
+    # Loudness normalisation is an audio filter, and a stream copy runs no
+    # filters. Without this the copy path wins, build_cmd emits -c:a copy, the
+    # -af is suppressed by its own guard, and the user gets a bit-identical
+    # file they believe is normalised — wrong and completely silent.
+    if loudnorm_preset(opts):
+        return True
     return False
 
 
@@ -583,6 +595,125 @@ def audio_args(target: str, quality, opts: dict) -> list:
     return []
 
 
+# ── Loudness ─────────────────────────────────────────────────────────────────
+
+# name -> (I, TP, LRA): integrated loudness in LUFS, true peak in dBTP, and
+# loudness range. "streaming" is the EBU R128-derived level Spotify/YouTube/
+# Apple all normalise to, so a file at -14 plays back unchanged there.
+LOUDNORM_PRESETS = {
+    "streaming": (-14.0, -1.0, 11.0),
+    "broadcast": (-23.0, -2.0, 7.0),
+    "loud":       (-9.0, -1.0, 15.0),
+}
+
+
+def loudnorm_preset(opts: dict):
+    """The (I, TP, LRA) triple this job asks for, or None when it doesn't."""
+    return LOUDNORM_PRESETS.get(str(opts.get("loudnorm") or "").strip().lower())
+
+
+def _loudnorm_measure_cmd(ffmpeg_exe: str, src, preset) -> list:
+    i, tp, lra = preset
+    return [
+        ffmpeg_exe, "-hide_banner", "-nostdin",
+        # NOT -loglevel warning, which build_cmd uses: loudnorm prints its JSON
+        # at info level, so warning suppresses it entirely and every
+        # measurement silently comes back empty. Verified on ffmpeg 8.1.
+        "-loglevel", "info",
+        "-progress", "pipe:1", "-nostats",
+        "-i", str(src),
+        "-af", f"loudnorm=I={i}:TP={tp}:LRA={lra}:print_format=json",
+        "-f", "null", "-",
+    ]
+
+
+def _parse_loudnorm_json(text: str) -> dict:
+    """Pull the last {...} block out of ffmpeg's stderr tail."""
+    end = text.rfind("}")
+    start = text.rfind("{", 0, end)
+    if start < 0 or end < 0:
+        return {}
+    try:
+        data = json.loads(text[start:end + 1])
+    except (ValueError, TypeError):
+        return {}
+    # Every value arrives as a string, and a silent file yields "-inf".
+    out = {}
+    for k in ("input_i", "input_tp", "input_lra", "input_thresh",
+              "target_offset"):
+        try:
+            v = float(data[k])
+        except (KeyError, TypeError, ValueError):
+            return {}
+        if v != v or v in (float("inf"), float("-inf")):
+            return {}
+        out[k] = v
+    return out
+
+
+def measure_loudness(ffmpeg_exe: str, src, preset, total_secs: float = 0.0,
+                     on_pct=None, should_abort=None, on_proc=None) -> dict:
+    """
+    Pass one: measure the file's actual loudness.
+
+    Returns the five measured values, or {} if anything at all went wrong —
+    the caller then falls back to single-pass, which still normalises, just
+    less precisely. Never raises: a failed measurement must not fail the job.
+    """
+    rc, tail = run_ffmpeg(_loudnorm_measure_cmd(ffmpeg_exe, src, preset),
+                          total_secs, on_pct=on_pct,
+                          should_abort=should_abort, on_proc=on_proc)
+    if rc != 0:
+        return {}
+    return _parse_loudnorm_json(tail)
+
+
+def loudnorm_filter(opts: dict, info: dict) -> str:
+    """
+    The -af chain for loudness normalisation, or '' when not asked for.
+
+    Two things beyond the loudnorm call itself, both of which are silent
+    quality/size regressions if left out:
+
+    * loudnorm resamples to 192 kHz internally and *outputs* at 192 kHz, so a
+      normalised 44.1 kHz FLAC comes out nearly 4x the size for no benefit.
+      aresample pins it back to the source rate.
+    * with the measured values from pass one it can normalise linearly — one
+      constant gain applied to the whole file. Without them it falls back to
+      dynamic mode, which rides the level and audibly pumps on quiet intros.
+    """
+    preset = loudnorm_preset(opts)
+    if not preset:
+        return ""
+    i, tp, lra = preset
+    f = f"loudnorm=I={i}:TP={tp}:LRA={lra}"
+
+    m = opts.get("loudnormMeasured") or {}
+    if m:
+        f += (f":measured_I={m['input_i']}:measured_TP={m['input_tp']}"
+              f":measured_LRA={m['input_lra']}"
+              f":measured_thresh={m['input_thresh']}"
+              f":offset={m['target_offset']}:linear=true")
+
+    rate = _int(opts.get("sampleRate")) or _int(info.get("sample_rate"))
+    if rate:
+        f += f",aresample={rate}"
+    return f
+
+
+def _loudnorm_sample_fmt(target: str, opts: dict, info: dict) -> list:
+    """
+    Keep a normalised lossless file at the source's bit depth.
+
+    loudnorm works in floating point, so FLAC otherwise promotes a 16-bit
+    source to 24-bit and roughly triples the file for zero audible gain.
+    Only ever pins *down* to what the source already was.
+    """
+    if target != "flac" or not loudnorm_preset(opts):
+        return []
+    return ["-sample_fmt", "s16"] if info.get("sample_fmt") == "s16" else []
+
+
 def _video_filters(opts: dict, target: str) -> str:
     """scale/fps filter chain from the Advanced fields. '' when untouched."""
     parts = []
@@ -663,7 +794,14 @@ def build_cmd(ffmpeg_exe: str, src, tmp_dst, target: str, quality,
             cmd += ["-c:v", "copy", "-disposition:v", "attached_pic"]
         else:
             cmd += ["-vn"]
+        # Guarded on copy_a because a stream copy runs no filter graph: asking
+        # for both is an ffmpeg error, not a silently ignored flag.
+        af = "" if copy_a else loudnorm_filter(opts, info)
+        if af:
+            cmd += ["-af", af]
         cmd += ["-c:a", "copy"] if copy_a else audio_args(target, quality, opts)
+        if not copy_a:
+            cmd += _loudnorm_sample_fmt(target, opts, info)
         sr, ch = _int(opts.get("sampleRate")), _int(opts.get("channels"))
         if sr and not copy_a:
             cmd += ["-ar", str(sr)]
@@ -698,6 +836,11 @@ def build_cmd(ffmpeg_exe: str, src, tmp_dst, target: str, quality,
                     "-pix_fmt", "yuv420p"]
         if vf:
             cmd += ["-vf", vf]
+
+    # Same seam as the audio branch: a normalised MP4 is a normal request.
+    af_a = "" if copy_a else loudnorm_filter(opts, info)
+    if af_a:
+        cmd += ["-af", af_a]
 
     if copy_a:
         cmd += ["-c:a", "copy"]

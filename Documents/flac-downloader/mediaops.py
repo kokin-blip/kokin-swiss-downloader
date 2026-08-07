@@ -607,6 +607,113 @@ def _mb_tag(mb: float) -> str:
     return f"{_mb_num(mb)}MB"
 
 
+# ── Loudness normalisation ───────────────────────────────────────────────────
+
+# Pass one only decodes, so it runs far faster than the encode; splitting the
+# bar 30/70 keeps it from crawling in the second half.
+_MEASURE_SHARE = 30.0
+
+
+def normalize(ffmpeg_exe: str, src, out_dir: str = "", preset: str = "streaming",
+              on_pct=None, should_abort=None, on_proc=None,
+              on_stage=None) -> dict:
+    """
+    Even out a file's loudness. Returns {'ok', 'path', 'msg'}.
+
+    Output keeps the source's own format, so normalising a FLAC hands back a
+    FLAC rather than quietly transcoding somebody's lossless library to MP3.
+    That also means this rides convert.build_cmd and inherits its encoder
+    table, temp-file discipline and cover-art handling rather than
+    reimplementing them.
+
+    Two passes: measure, then apply the measurement. Single-pass loudnorm is a
+    *dynamic* normaliser that lands 1-3 LU off and audibly pumps on quiet
+    intros. If the measurement fails for any reason we still run the second
+    pass without it — a slightly imprecise result beats no result.
+    """
+    src = Path(src)
+    if not src.is_file():
+        return {"ok": False, "path": "", "msg": "That file is no longer there."}
+    if not ffmpeg_exe:
+        return {"ok": False, "path": "", "msg": "ffmpeg wasn't found."}
+    if not convert.LOUDNORM_PRESETS.get(str(preset).lower()):
+        return {"ok": False, "path": "", "msg": "Unknown loudness target."}
+    kind = preview.kind_of(src)
+    if kind not in ("video", "audio"):
+        return {"ok": False, "path": "",
+                "msg": "Only videos and audio have a loudness to even out."}
+
+    # category_for_target takes a bare extension; CATEGORY_OF_EXT is keyed with
+    # the dot and answers a different question (what a *source* file is, not
+    # what we can encode to). Only the former tells us we can write this back.
+    target = src.suffix.lower().lstrip(".")
+    if not convert.category_for_target(target):
+        return {"ok": False, "path": "",
+                "msg": f"Can't write {target.upper()} files."}
+
+    info = convert.probe_full(ffmpeg_exe, src)
+    if not info.get("acodec"):
+        return {"ok": False, "path": "",
+                "msg": "There's no audio in that file to normalise."}
+    duration = info.get("duration", 0.0)
+
+    folder = Path(out_dir) if out_dir else src.parent
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return {"ok": False, "path": "", "msg": f"Can't write to that folder: {e}"}
+
+    dst = preview.unique_path(
+        folder / f"{preview.safe_stem(src.stem)}_normalized.{target}")
+    tmp = convert.temp_path(dst)
+
+    # ── pass 1 ──
+    if on_stage:
+        on_stage("Measuring loudness…")
+    measured = convert.measure_loudness(
+        ffmpeg_exe, src, convert.LOUDNORM_PRESETS[str(preset).lower()],
+        duration,
+        on_pct=(lambda p: on_pct(p * _MEASURE_SHARE / 100)) if on_pct and duration else on_pct,
+        should_abort=should_abort, on_proc=on_proc)
+    if should_abort and should_abort():
+        return {"ok": False, "path": "", "msg": "Stopped."}
+
+    # ── pass 2 ──
+    if on_stage:
+        on_stage("Applying…" if measured else "Applying (estimated)…")
+    opts = {"loudnorm": str(preset).lower(), "loudnormMeasured": measured}
+    cmd = convert.build_cmd(ffmpeg_exe, src, tmp, target,
+                            convert.DEFAULT_QUALITY.get(target, 3), opts, info)
+    rc, tail = convert.run_ffmpeg(
+        cmd, duration,
+        on_pct=(lambda p: on_pct(_MEASURE_SHARE + p * (100 - _MEASURE_SHARE) / 100))
+        if on_pct else None,
+        should_abort=should_abort, on_proc=on_proc)
+
+    if rc == -1:
+        _discard(tmp)
+        return {"ok": False, "path": "", "msg": "Stopped."}
+    if rc != 0 or not tmp.exists() or tmp.stat().st_size == 0:
+        _discard(tmp)
+        return {"ok": False, "path": "",
+                "msg": (tail.splitlines()[-1] if tail
+                        else "ffmpeg couldn't normalise that file.")}
+    try:
+        tmp.replace(dst)
+    except OSError as e:
+        _discard(tmp)
+        return {"ok": False, "path": "", "msg": f"Couldn't save it: {e}"}
+
+    i_target = convert.LOUDNORM_PRESETS[str(preset).lower()][0]
+    msg = f"Saved {dst.name} — now about {i_target:g} LUFS"
+    if measured:
+        msg += f" (was {measured['input_i']:g})"
+    else:
+        # Honest about the degraded path rather than silently doing less.
+        msg += ". Couldn't measure it first, so this is an estimate."
+    return {"ok": True, "path": str(dst), "msg": msg}
+
+
 def _clock_words(secs: float) -> str:
     """'4m 20s' — for sentences, where 0:04:20 reads as a timestamp."""
     secs = max(0, int(secs))
