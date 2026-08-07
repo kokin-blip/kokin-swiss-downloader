@@ -39,6 +39,13 @@ pyinstaller ^
   --name "Swiss Downloader" ^
   --add-data "ui;ui" ^
   --add-binary "ffmpeg\ffmpeg.exe;ffmpeg" ^
+REM --collect-all pywebview is a no-op: the import name is "webview", so it
+REM matches nothing and returns empty lists. Left in place deliberately.
+REM pywebview ships its own hook (webview\__pyinstaller\hook-webview.py) which
+REM is what actually bundles webview\js\*.js — including api.js, which is both
+REM the Python<->page bridge and the JS half of drag & drop. Verified present
+REM in the built exe. Changing this to "webview" would pull the GTK/Qt/Cocoa
+REM backends into the analysis for no gain.
   --collect-all pywebview ^
   --collect-all mutagen ^
   --collect-all curl_cffi ^

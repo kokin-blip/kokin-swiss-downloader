@@ -4,6 +4,8 @@ All public methods are callable from JS via window.pywebview.api.<method>().
 Progress updates are pushed into a queue and drained by JS polling poll_updates().
 """
 
+import base64
+import json
 import os
 import queue
 import re
@@ -21,7 +23,9 @@ except ImportError:
 
 import settings as cfg
 import cookies as site_cookies
+import clipwatch
 import convert
+import dropfiles
 import history
 import mediaops
 import preview
@@ -510,6 +514,10 @@ class API:
         # loading touches disk (app_data_dir() creates it), which can fail on a
         # redirected or locked-down %LOCALAPPDATA%. Losing the debug-log
         # preference is survivable; losing the app is not.
+        # Constructed, not started. Starting needs a window to push into, and
+        # there isn't one yet — app.py builds API() before create_window().
+        # ui_ready() starts it once the bridge is actually up.
+        self._clip = clipwatch.ClipboardWatcher(self._on_clipboard_url)
         try:
             set_debug(cfg.load().get("debug_log", False))
             debug_log(f"--- Swiss Downloader {__version__} started "
@@ -549,7 +557,141 @@ class API:
         return {"ok": True, "maximized": self._maximized}
 
     def close_window(self):
+        # Stop the watcher first: a tick that fires mid-teardown would park a
+        # thread inside evaluate_js against a WebView2 that is going away.
+        self.on_closed()
         if self._window: self._window.destroy()
+
+    def on_closed(self):
+        """Also wired to window.events.closed, for the Alt+F4 / taskbar route."""
+        try:
+            self._clip.stop()
+        except Exception:
+            pass
+
+    # ── Talking to the page ───────────────────────────────────────────────────
+
+    def _push_js(self, fn: str, payload: dict) -> bool:
+        """
+        Push an event straight into the page, bypassing the update queue.
+
+        poll_updates() is only drained while a job is running — startPolling()
+        is never called at startup and stopPolling() fires the moment the queue
+        drains. Both callers here (a copied link, a dropped file) fire when
+        nothing is running, so anything emitted the usual way would sit unread
+        until the next download and then arrive in a burst, attached to the
+        wrong moment.
+
+        The payload is base64'd because evaluate_js embeds the script inside
+        eval("…") after its own escaping pass — a filename containing a quote
+        or a backslash would otherwise go through two escaping layers, which is
+        exactly the bug that works on every path in dev and breaks on somebody
+        else's disk.
+
+        Never raises: a notification that fails must not take anything with it.
+        """
+        w = self._window
+        if w is None:
+            return False
+        try:
+            b64 = base64.b64encode(
+                json.dumps(payload).encode("utf-8")).decode("ascii")
+            w.evaluate_js(f"window.__push('{fn}','{b64}')")
+            return True
+        except Exception as e:
+            debug_log(f"_push_js({fn}) failed: {e}")
+            return False
+
+    def ui_ready(self) -> dict:
+        """
+        Called once by init(), after the bridge is up. Arms drag & drop and,
+        if the user asked for it, the clipboard watcher.
+
+        Not done in __init__ (no window yet) and not from window.events.loaded
+        (which cannot report back to the page). Runs on the thread the JS
+        bridge spawns, so the evaluate_js inside the DOM registration cannot
+        deadlock the GUI thread.
+
+        Never raises. init() has no try/catch around its own body, so throwing
+        here would abort the rest of it and leave the Settings tab half filled
+        in and the update check unrun.
+        """
+        drop = clip = False
+        try:
+            drop = self._register_drop()
+        except Exception as e:
+            debug_log(f"drop registration failed: {e}")
+        try:
+            clip = self._apply_clipboard(cfg.load())
+        except Exception as e:
+            debug_log(f"clipboard watch failed to start: {e}")
+        return {"drop": bool(drop), "clip": bool(clip)}
+
+    def _register_drop(self) -> bool:
+        """
+        Attach the Python-side drop listener.
+
+        It has to be Python-side: edgechromium's on_script_notify throws the
+        dropped paths away unless webview.dom._dnd_state['num_listeners'] is
+        non-zero, and only Element.on('drop', …) ever increments that. A pure
+        JS listener receives the event but never the real file paths.
+
+        Bound to `document` only. Every registered listener makes pywebview's
+        api.js post its own copy of the file list, so a second listener would
+        duplicate the paths and fan the callback out 2x2.
+        """
+        w = self._window
+        if w is None:
+            return False
+        from webview.dom import DOMEventHandler   # lazy, like pick_files' imports
+
+        doc = w.dom.document
+        # Idempotent: DOM wipes its element cache on every page load, so after a
+        # reload this is a fresh Element with an empty handler list and we
+        # correctly register again.
+        if self._on_drop in doc._event_handlers.get("drop", []):
+            return True
+        doc.events.drop += DOMEventHandler(self._on_drop, True, True)
+        return True
+
+    def _on_drop(self, event):
+        """
+        A drop landed. Runs on a thread pywebview spawns per event, so it does
+        nothing but sort the paths and push the result.
+        """
+        try:
+            found = dropfiles.paths_from_event(event)
+            sorted_ = dropfiles.classify(found["paths"][:dropfiles.MAX_DROP])
+            self._push_js("onFilesDropped", {
+                "files":      [{"path": p, "name": os.path.basename(p)}
+                               for p in sorted_["media"]],
+                "folders":    sorted_["folders"][:4],
+                "cats":       sorted_["cats"],
+                "other":      len(sorted_["other"]),
+                "gone":       len(sorted_["gone"]),
+                "unresolved": found["unresolved"],
+                "capped":     max(0, len(found["paths"]) - dropfiles.MAX_DROP),
+            })
+            # Counts only. redact_url's docstring explains why the log is
+            # treated as public, and a list of dropped files is a directory
+            # listing of somebody's disk.
+            debug_log(f"drop: {len(sorted_['media'])} media, "
+                      f"{len(sorted_['folders'])} folders, "
+                      f"{len(sorted_['other'])} other, "
+                      f"{found['unresolved']} unresolved")
+        except Exception as e:
+            debug_log(f"drop handling failed: {e}")
+
+    def _on_clipboard_url(self, url: str):
+        """A URL was copied. Offer it; never act on it."""
+        self._push_js("onClipboardUrl", {"url": url})
+
+    def _apply_clipboard(self, s: dict) -> bool:
+        """Start or stop the watcher to match the saved setting."""
+        if s.get("clipboard_watch", False):
+            return self._clip.start()
+        self._clip.stop()
+        return False
 
     # ── Initialisation ────────────────────────────────────────────────────────
 
@@ -568,6 +710,7 @@ class API:
             "proxy":            s.get("proxy", ""),
             "debugLog":         s.get("debug_log", False),
             "notifyDone":       s.get("notify_done", True),
+            "clipboardWatch":   s.get("clipboard_watch", False),
             "outtmplAudio":     s.get("outtmpl_audio", cfg.DEFAULTS["outtmpl_audio"]),
             "outtmplVideo":     s.get("outtmpl_video", cfg.DEFAULTS["outtmpl_video"]),
             "subLangs":         s.get("sub_langs", "en"),
@@ -594,6 +737,7 @@ class API:
                           ("proxy",        "proxy"),
                           ("debugLog",     "debug_log"),
                           ("notifyDone",   "notify_done"),
+                          ("clipboardWatch", "clipboard_watch"),
                           ("outtmplAudio", "outtmpl_audio"),
                           ("outtmplVideo", "outtmpl_video"),
                           ("subLangs",     "sub_langs"),
@@ -614,19 +758,41 @@ class API:
 
         # Reject a broken template here rather than at download time, when the
         # user has walked away and the only symptom is a failed job.
-        for dest, fallback in (("outtmpl_audio", "%(artist,uploader)s - %(title)s"),
-                               ("outtmpl_video", "%(uploader)s - %(title)s")):
+        #
+        # Note the single exit. This used to save and return early on a bad
+        # template, which skipped the apply step below — so saving a broken
+        # filename template silently threw away whatever else was on the form,
+        # and the user was told only about the template. Every live-applied
+        # setting now goes through one call on both paths.
+        problem = ""
+        for dest in ("outtmpl_audio", "outtmpl_video"):
             err = validate_outtmpl(s.get(dest))
             if err:
                 s[dest] = cfg.DEFAULTS[dest]
-                cfg.save(s)
-                return {"ok": False,
-                        "msg": f"Filename template rejected ({err}) — reset to default."}
+                problem = f"Filename template rejected ({err}) — reset to default."
+                break
+
         cfg.save(s)
-        # Apply immediately: API is constructed once, so without this the
-        # toggle would not take effect until the app was restarted.
-        set_debug(s.get("debug_log", False))
-        return {"ok": True, "msg": "Settings saved."}
+        self._apply_live_settings(s)
+        return {"ok": not problem, "msg": problem or "Settings saved."}
+
+    def _apply_live_settings(self, s: dict) -> None:
+        """
+        Make the saved settings take effect now.
+
+        API is constructed once and holds no live view of settings, so without
+        this a toggle would persist perfectly and do nothing until the app was
+        restarted. Each one is guarded separately: a failure to apply must not
+        stop the others, and must never fail the save that already succeeded.
+        """
+        try:
+            set_debug(s.get("debug_log", False))
+        except Exception:
+            pass
+        try:
+            self._apply_clipboard(s)
+        except Exception:
+            pass
 
     def check_for_updates(self) -> None:
         """Non-blocking: starts a background thread that pushes 'update_available' if newer."""

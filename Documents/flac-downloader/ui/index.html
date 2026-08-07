@@ -171,6 +171,41 @@ html, body {
   flex-shrink: 0;
 }
 
+/* ── Notice bar ───────────────────────────────────────────────────────────────
+   One slim, non-modal strip shared by the clipboard offer and the drop report.
+   Deliberately one and not two: at 22px each, two stacked bars eat 5% of an
+   820px window. Last writer wins.
+   It sits between the tab border and .window-body rather than inside it, so it
+   takes its height from .window-body's flex:1 instead of competing with the
+   panes inside a container that is overflow:hidden. */
+.notice-bar {
+  display: none; align-items: center; gap: 6px;
+  flex-shrink: 0; height: 22px; padding: 0 6px;
+  background: var(--win-gray); font-size: 10px;
+  box-shadow: inset 0 1px 0 var(--win-light), inset 0 -1px 0 var(--win-dark);
+}
+.notice-bar.on { display: flex; }
+.notice-text { flex: 1 1 auto; min-width: 0; white-space: nowrap;
+               overflow: hidden; text-overflow: ellipsis; }
+.notice-btn { min-width: 0; padding: 0 8px; height: 16px; line-height: 14px;
+              font-size: 10px; flex: 0 0 auto; }
+
+/* Full-window drop target. Beyond telling the user where to let go, it keeps
+   the drop event's target a single empty div: pywebview serialises the target
+   node's whole subtree, so dropping onto the log box would post megabytes.
+   z-index sits below the 8000/9000 modals so a drop can't cover a prompt. */
+#dropZone {
+  display: none; position: fixed; inset: 0; z-index: 7000;
+  background: rgba(0, 0, 128, 0.35);
+  align-items: center; justify-content: center;
+}
+#dropZone.on { display: flex; }
+.dropzone-inner {
+  background: var(--win-gray); padding: 10px 18px; font-weight: bold;
+  box-shadow: inset -1px -1px 0 var(--win-darker), inset 1px 1px 0 var(--win-light),
+              inset -2px -2px 0 var(--win-dark), inset 2px 2px 0 var(--win-lighter);
+}
+
 /* ── Content body ─────────────────────────────────────────────────────────── */
 .window-body {
   flex: 1;
@@ -1041,6 +1076,15 @@ hr.separator {
     </div>
   </div>
 
+  <!-- One slim strip shared by the clipboard offer and the drop report.
+       Hidden until something has to be said; takes zero height when hidden. -->
+  <div class="notice-bar" id="noticeBar">
+    <span id="noticeIcon">📋</span>
+    <span class="notice-text" id="noticeText"></span>
+    <button class="btn notice-btn" id="noticeAction" onclick="noticeAct()"></button>
+    <button class="btn notice-btn" onclick="hideNotice()" title="Dismiss">✕</button>
+  </div>
+
   <!-- Window Body -->
   <div class="window-body">
 
@@ -1621,6 +1665,12 @@ hr.separator {
           <div class="label-sm">Plays the system sound and flashes the taskbar
             once the whole queue is done, so you can leave it running.</div>
           <hr class="separator">
+          <label><input type="checkbox" id="sClipboardWatch"> Offer links I copy</label>
+          <div class="label-sm">When you copy a link anywhere on your PC, a bar appears
+            offering to paste it. Off by default. It only ever looks at text that is a
+            plain web link, it never starts a download on its own, nothing is written to
+            the log, and nothing leaves your computer.</div>
+          <hr class="separator">
           <label><input type="checkbox" id="sDebugLog"> Write a debug log</label>
           <div class="label-sm">Saves error details to a file so a failing download can be
             diagnosed. Off by default; leave it off unless you're chasing a problem.</div>
@@ -1734,6 +1784,8 @@ hr.separator {
     </div>
   </div>
 
+  <div id="dropZone"><div class="dropzone-inner">Drop files here to convert</div></div>
+
 </div><!-- /window -->
 
 <script>
@@ -1750,6 +1802,151 @@ async function toggleMaximize() {
   const btn = document.getElementById('btnMaximize');
   btn.textContent = r.maximized ? '❐' : '□';
   btn.title       = r.maximized ? 'Restore' : 'Maximize';
+}
+
+// ── Notice bar ────────────────────────────────────────────────────────────────
+// One strip, shared. Always textContent, never innerHTML: a filename is allowed
+// to be `<img onerror=alert(1)>.mp3` and a URL comes straight off the clipboard.
+
+let _noticeAction = null, _noticeTimer = null;
+
+function showNotice(icon, text, actionLabel, fn, ttl) {
+  clearTimeout(_noticeTimer);
+  document.getElementById('noticeIcon').textContent = icon;
+  document.getElementById('noticeText').textContent = text;
+  const b = document.getElementById('noticeAction');
+  b.textContent = actionLabel || '';
+  b.style.display = actionLabel ? '' : 'none';
+  _noticeAction = fn || null;
+  document.getElementById('noticeBar').classList.add('on');
+  if (ttl) _noticeTimer = setTimeout(hideNotice, ttl);
+}
+
+function hideNotice() {
+  clearTimeout(_noticeTimer);
+  document.getElementById('noticeBar').classList.remove('on');
+  _noticeAction = null;
+}
+
+function noticeAct() { const f = _noticeAction; hideNotice(); if (f) f(); }
+
+// A 22px bar can't show a 300-character URL; keep the ends, which is where the
+// site and the id live.
+function shortUrl(u) {
+  u = String(u || '').replace(/^https?:\/\//, '');
+  return u.length <= 58 ? u : u.slice(0, 34) + '…' + u.slice(-20);
+}
+
+// ── Python → page push ────────────────────────────────────────────────────────
+// The update queue is only drained while a job is running, and both callers here
+// fire when nothing is. Base64 because the payload is embedded in an eval() on
+// the Python side and filenames contain quotes and backslashes.
+window.__push = function (fn, b64) {
+  try {
+    const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+    const f = window[fn];
+    if (typeof f === 'function') f(JSON.parse(new TextDecoder().decode(bytes)));
+  } catch (e) { /* a push must never break the page */ }
+  return 1;      // give evaluate_js something JSON-serialisable to hand back
+};
+
+// ── Drag & drop ───────────────────────────────────────────────────────────────
+let _dropOK = false, _dragTimer = null;
+
+function _dragShow() {
+  if (!_dropOK) return;         // don't advertise a target that does nothing
+  document.getElementById('dropZone').classList.add('on');
+  clearTimeout(_dragTimer);
+  // dragover repeats while the pointer is over the window. If it stops without
+  // a drop, the drag left — and dragleave is unreliable across child elements.
+  _dragTimer = setTimeout(_dragHide, 400);
+}
+function _dragHide() {
+  clearTimeout(_dragTimer);
+  document.getElementById('dropZone').classList.remove('on');
+}
+
+['dragenter', 'dragover'].forEach(ev => document.addEventListener(ev, e => {
+  // pywebview does not cancel these, and an uncancelled dragover means 'drop'
+  // never fires at all. Done in plain JS rather than a Python DOMEventHandler:
+  // that would round-trip and spawn a thread per event, ~60 a second.
+  e.preventDefault();
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+  _dragShow();
+}));
+
+document.addEventListener('drop', e => {
+  // Unconditional, and independent of whether Python registered anything. The
+  // default action for a dropped file is to NAVIGATE to it — which would
+  // replace the whole UI inside a frameless window with no address bar and no
+  // way back. This one line is the entire defence.
+  e.preventDefault();
+  _dragHide();
+});
+
+function onFilesDropped(d) {
+  d = d || {};
+  const wasEmpty = _convFiles.length === 0;
+  let added = convAddPaths(d.files || []);
+
+  // Only when the whole drop is one kind, and only into an empty list — never
+  // second-guess someone who has already set the tab up.
+  if (wasEmpty && added && (d.cats || []).length === 1) {
+    const want = {audio: 'mp3', video: 'mp4', image: 'png'}[d.cats[0]];
+    if (want && CONVERT_CAT[convTarget()] !== d.cats[0]) {
+      document.getElementById('convTarget').value = want;
+      onConvertTargetChange();
+    }
+  }
+
+  const offered = (d.files || []).length;
+  const folders = d.folders || [];
+  const finish = () => {
+    const bits = [];
+    if (added)        bits.push('Added ' + added + ' file' + (added === 1 ? '' : 's'));
+    if (d.other)      bits.push(d.other + ' not audio, video or an image');
+    if (d.gone)       bits.push(d.gone + ' no longer there');
+    if (d.capped)     bits.push(d.capped + ' over the limit, skipped');
+    // Never silently swallow the ones Windows didn't hand over — say so, and
+    // point at the route that always works.
+    if (d.unresolved) bits.push(d.unresolved + " Windows didn't hand over — use Add Files…");
+    if (!bits.length) {
+      // "Nothing usable" would be a lie for a file that is simply already in
+      // the list, and for a folder that scanned to nothing the scan has
+      // already said why in the log.
+      bits.push(offered ? (offered === 1 ? 'That one is already in the list.'
+                                         : 'Those are already in the list.')
+                        : folders.length ? 'Nothing to convert in that folder.'
+                                         : 'Nothing usable in that drop.');
+    }
+    if (added) switchTab('convert');
+    showNotice('📂', bits.join(' · '), '', null, 8000);
+  };
+
+  if (!folders.length) { finish(); return; }
+  (async () => {
+    for (const f of folders) { added += (await convAddFolderPath(f)) || 0; }
+    finish();
+  })();
+}
+
+// ── Clipboard offer ───────────────────────────────────────────────────────────
+function onClipboardUrl(d) {
+  const url = (d && d.url) || '';
+  if (!url) return;
+  // Resolved when the button is pressed, not when the bar appears — the user
+  // may well switch tabs while it is up.
+  const box = () => document.getElementById(
+    document.getElementById('tab-video').classList.contains('active')
+      ? 'urlInputVideo' : 'urlInput');
+  if (box().value.trim() === url) return;      // already there; say nothing
+  showNotice('📋', 'Link copied: ' + shortUrl(url), 'Paste', () => {
+    const el = box();
+    el.value = url;
+    el.focus();
+    el.select();
+    setStatus('Pasted from clipboard.');
+  }, 20000);
 }
 
 // ── Tab switching ─────────────────────────────────────────────────────────────
@@ -1951,15 +2148,22 @@ async function convAddFiles() {
 async function convAddFolder() {
   const folder = await api('browse_folder');
   if (!folder) return;
+  await convAddFolderPath(folder);
+}
+
+// Split out so a dropped folder goes through exactly the same scan as a browsed
+// one — same cap, same recursive checkbox, same "already that format" message.
+async function convAddFolderPath(folder) {
   const r = await api('scan_convert_folder', folder, convTarget(),
                       document.getElementById('convRecursive').checked,
                       document.getElementById('convOutDir').value.trim(),
                       document.getElementById('convForce').checked);
-  if (!r.ok) { appendLog(r.msg, 'err'); setStatus('Ready'); return; }
+  if (!r.ok) { appendLog(r.msg, 'err'); setStatus('Ready'); return 0; }
   const n = convAddPaths(r.files);
   let msg = 'Added ' + n + ' file' + (n === 1 ? '' : 's') + ' from ' + folder;
   if (r.same_fmt) msg += ' (' + r.same_fmt + ' already ' + convTarget().toUpperCase() + ')';
   appendLog(msg, 'info');
+  return n;
 }
 
 function convRemove(i) { _convFiles.splice(i, 1); renderConvFiles(); }
@@ -3473,6 +3677,7 @@ async function saveSettings() {
     proxy:        document.getElementById('sProxy').value.trim(),
     debugLog:     document.getElementById('sDebugLog').checked,
     notifyDone:   document.getElementById('sNotifyDone').checked,
+    clipboardWatch: document.getElementById('sClipboardWatch').checked,
     outtmplAudio: document.getElementById('sOuttmplAudio').value.trim(),
     outtmplVideo: document.getElementById('sOuttmplVideo').value.trim(),
     subLangs:     document.getElementById('sSubLangs').value.trim() || 'en',
@@ -3517,6 +3722,8 @@ async function init() {
   document.getElementById('sProxy').value          = d.proxy || '';
   document.getElementById('sDebugLog').checked     = !!d.debugLog;
   document.getElementById('sNotifyDone').checked   = d.notifyDone !== false;
+  // !! and not `!== false`: this one defaults OFF, so undefined must read false.
+  document.getElementById('sClipboardWatch').checked = !!d.clipboardWatch;
   document.getElementById('sOuttmplAudio').value   = d.outtmplAudio || '';
   document.getElementById('sOuttmplVideo').value   = d.outtmplVideo || '';
   document.getElementById('sSubLangs').value       = d.subLangs || 'en';
@@ -3567,6 +3774,20 @@ async function init() {
   appendLog('Fallback chain: yt-dlp → Odesli → YouTube search → Proxy → MusicBrainz', 'dim');
   appendLog('Paste a URL above and click Download.', 'ok');
   appendLog('⚠ Legal: only download content you own or have permission to copy.', 'warn');
+
+  // Last, and guarded. This arms drag & drop and the clipboard watcher, both of
+  // which need the bridge to already be up — but init() has no try/catch of its
+  // own, so a throw anywhere above would leave the Settings tab half filled in
+  // and the update check never started. Nothing here is worth that.
+  try {
+    const r = await api('ui_ready');
+    _dropOK = !!(r && r.drop);
+  } catch (e) {
+    _dropOK = false;
+  }
+  if (!_dropOK) {
+    appendLog('Drag & drop is unavailable in this build — use “Add Files…”.', 'dim');
+  }
 }
 
 // Wait for pywebview bridge to be ready

@@ -16,6 +16,10 @@ DEFAULTS: dict = {
     "proxy":          "",  # e.g. "http://127.0.0.1:8080" or "socks5://..."
     "debug_log":      False,  # write tracebacks to app_data_dir()/logs/
     "notify_done":    True,   # chime + flash the taskbar when the queue drains
+    # Offer a link when one is copied. Off by default and deliberately so:
+    # continuously reading the clipboard is the kind of thing a user should
+    # switch on knowingly, not discover. Nothing is ever logged or sent.
+    "clipboard_watch": False,
 
     # Filename templates, in yt-dlp's output-template syntax. The ".%(ext)s"
     # suffix is appended by the backend and deliberately not user-editable —

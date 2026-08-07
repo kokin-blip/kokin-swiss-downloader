@@ -33,6 +33,9 @@ def main():
         background_color = "#008080",
     )
     api.set_window(window)
+    # close_window() covers the in-app ✕. This covers Alt+F4 and the taskbar,
+    # so the clipboard watcher is always stopped before the window goes away.
+    window.events.closed += api.on_closed
     webview.start(debug=False)
 
 if __name__ == "__main__":
