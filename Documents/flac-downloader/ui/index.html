@@ -656,6 +656,40 @@ hr.separator {
 .conv-adv-row label { flex: 0 0 92px; font-size: 10px; color: var(--win-dark); }
 .conv-adv-row input.form-control, .conv-adv-row select.form-control { width: 72px; }
 
+/* ── Social tab ───────────────────────────────────────────────────────────── */
+/* Same 404px cap as .convert-scroll, for the same reason: the shared log below
+   has to sit at the same height on every tab that shows it. */
+.social-scroll { max-height: 404px; overflow-y: auto; padding-right: 4px; }
+#socFiles { max-height: 92px; }
+
+/* Sunken wells. The four insets are written out rather than composing .sunken
+   because that is what every other boxed list here does. */
+#socPlatforms, #socPlan {
+  overflow-y: auto; background: var(--win-light); padding: 2px;
+  box-shadow: inset  1px  1px 0 var(--win-darker), inset -1px -1px 0 var(--win-light),
+              inset  2px  2px 0 var(--win-dark),   inset -2px -2px 0 var(--win-lighter);
+}
+#socPlatforms { max-height: 138px; }
+#socPlan      { max-height: 96px; padding: 3px 4px; }
+
+.soc-group {
+  font-size: 10px; font-weight: bold; color: var(--win-dark);
+  margin: 3px 0 1px 2px;
+}
+.soc-row { display: flex; align-items: center; gap: 4px; padding: 1px 2px; }
+.soc-row:hover { background: var(--win-lighter); }
+.soc-row label { display: flex; align-items: center; gap: 4px; flex: 1 1 auto;
+                 cursor: default; min-width: 0; }
+.soc-row .soc-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.soc-row .soc-dims { font-size: 10px; color: var(--win-dark); flex: 0 0 auto; }
+.soc-row input.form-control { width: 54px; flex: 0 0 auto; }
+.soc-row .soc-mb { font-size: 10px; color: var(--win-dark); flex: 0 0 auto; }
+
+.soc-plan-row  { padding: 1px 0; }
+.soc-plan-head { font-weight: bold; }
+.soc-plan-warn { color: #aa6600; }
+.soc-plan-err  { color: #aa0000; }
+
 /* ── History tab ──────────────────────────────────────────────────────────── */
 /* The pane owns the whole window body here (the shared log/progress area is
    hidden on this tab), so the list flexes and the preview below it is fixed. */
@@ -996,6 +1030,7 @@ hr.separator {
     <button class="tab-btn active" id="tab-audio"    onclick="switchTab('audio')">Audio</button>
     <button class="tab-btn"        id="tab-video"    onclick="switchTab('video')">Video</button>
     <button class="tab-btn"        id="tab-convert"  onclick="switchTab('convert')">Convert</button>
+    <button class="tab-btn"        id="tab-social"   onclick="switchTab('social')">Social</button>
     <button class="tab-btn"        id="tab-history"  onclick="switchTab('history')">History</button>
     <button class="tab-btn"        id="tab-settings" onclick="switchTab('settings')">Settings</button>
   </div>
@@ -1406,6 +1441,77 @@ hr.separator {
 
       </div>
     </div><!-- /pane-convert -->
+
+    <!-- ── SOCIAL TAB ────────────────────────────────────────────────────── -->
+    <div class="tab-pane" id="pane-social">
+      <div class="social-scroll">
+
+        <div class="form-group">
+          <label>Videos <span class="label-sm">(one file per platform you tick)</span></label>
+          <div class="flex-row">
+            <button class="btn" onclick="socAddFiles()">Add Files…</button>
+            <button class="btn" onclick="socAddFolder()">Add Folder…</button>
+            <button class="btn" onclick="socClearFiles()" style="min-width:60px">Clear</button>
+          </div>
+          <div class="search-results mt4" id="socFiles" style="display:none"></div>
+          <div class="label-sm mt4" id="socSummary">No files selected.</div>
+        </div>
+
+        <div class="form-group">
+          <label>Save to <span class="label-sm">(blank = next to each source file)</span></label>
+          <div class="input-group">
+            <input type="text" class="form-control" id="socOutDir" spellcheck="false" placeholder="(same folder as the source file)">
+            <button class="btn" onclick="browseFolder('social')" style="min-width:70px">Browse…</button>
+          </div>
+          <label class="form-check mt4">
+            <input type="checkbox" id="socFolderPer"> <span class="label-sm">a sub-folder per platform</span>
+          </label>
+        </div>
+
+        <div class="form-group">
+          <label>Make it for
+            <span class="label-sm" id="socPlatformCount">nothing ticked yet</span>
+          </label>
+          <!-- Filled at boot from social_presets(); no dimension or size limit
+               is written down in this file. -->
+          <div id="socPlatforms"></div>
+        </div>
+
+        <div class="form-group">
+          <label>When the shape doesn't match</label>
+          <div class="flex-row" id="socModes" style="flex-wrap:wrap;gap:10px"></div>
+        </div>
+
+        <div class="form-group">
+          <label>Also</label>
+          <div class="flex-row" style="flex-wrap:wrap;gap:12px">
+            <label class="form-check">
+              <input type="checkbox" id="socLoudness" onchange="socPlanSoon()"> Match loudness
+              <span class="label-sm">(-14 LUFS)</span>
+            </label>
+            <label class="form-check">
+              <input type="checkbox" id="socStripMeta"> Strip metadata
+              <span class="label-sm">(location, device)</span>
+            </label>
+            <label class="form-check">
+              <input type="checkbox" id="socTrim" onchange="socPlanSoon()"> Trim to fit
+              <span class="label-sm">(if it's too long)</span>
+            </label>
+            <label class="form-check">
+              <input type="checkbox" id="socCover"> Cover frame
+            </label>
+          </div>
+        </div>
+
+        <div class="flex-row mt6">
+          <button class="btn" onclick="socPlan()" style="min-width:110px">What'll I get?</button>
+          <span class="spacer"></span>
+          <button class="btn" id="btnSocial" onclick="startSocial()" style="min-width:110px;font-weight:bold">Make them</button>
+        </div>
+        <div id="socPlan" class="mt4" style="display:none"></div>
+
+      </div>
+    </div><!-- /pane-social -->
 
     <!-- ── HISTORY TAB ───────────────────────────────────────────────────── -->
     <div class="tab-pane full-height" id="pane-history">
@@ -1886,6 +1992,13 @@ document.addEventListener('drop', e => {
 
 function onFilesDropped(d) {
   d = d || {};
+  // A drop feeds the list the user is actually looking at. Without this the
+  // Social tab quietly fills the Convert tab's invisible file list, and the
+  // drop appears to have done nothing at all.
+  if (document.getElementById('tab-social').classList.contains('active')) {
+    onFilesDroppedSocial(d);
+    return;
+  }
   const wasEmpty = _convFiles.length === 0;
   let added = convAddPaths(d.files || []);
 
@@ -1960,8 +2073,16 @@ function switchTab(name) {
   // the list plus the player, so frame extraction reports progress on its own
   // inline bar instead of the shared one.
   const out = document.getElementById('outputArea');
-  if (name === 'audio' || name === 'video' || name === 'convert') out.classList.add('active');
-  else                                                            out.classList.remove('active');
+  if (name === 'audio' || name === 'video' || name === 'convert' || name === 'social')
+       out.classList.add('active');
+  else out.classList.remove('active');
+
+  // The drop zone feeds whichever file list is actually on screen, so its
+  // label has to say which one that is.
+  const dz = document.querySelector('#dropZone .dropzone-inner');
+  if (dz) dz.textContent = (name === 'social')
+    ? 'Drop videos here to resize for social'
+    : 'Drop files here to convert';
 
   if (name === 'history') refreshHistory();
   else histPausePreview();
@@ -2225,6 +2346,270 @@ async function startConvert() {
   beforeDownload('convert');
 }
 
+// ── Social ────────────────────────────────────────────────────────────────────
+// Every platform's dimensions, duration cap and size limit come from
+// social_presets() at boot. Nothing about a platform is written down here — the
+// same rule the loudness presets follow, for the same reason: a number typed
+// into this file would eventually disagree with the encoder that uses it.
+let _socFiles = [], _socPresets = [], _socModes = [], _socVideoExts = [];
+let _socPlanTimer = null;
+
+async function loadSocialPresets() {
+  const r = await api('social_presets');
+  if (!r || !r.ok) return;
+  _socPresets = r.presets || [];
+  _socModes = r.modes || [];
+  _socVideoExts = r.video_exts || [];
+  renderSocPlatforms();
+  renderSocModes(r.default_mode);
+}
+
+function renderSocPlatforms() {
+  const box = document.getElementById('socPlatforms');
+  let html = '', group = null;
+  _socPresets.forEach(p => {
+    if (p.group !== group) {
+      group = p.group;
+      html += '<div class="soc-group">' + escapeHtml(group) + '</div>';
+    }
+    // The 'checked' date is the honest staleness marker: these limits move, and
+    // the editable MB field beside it is what lets somebody carry on when one
+    // has. Both are per-preset, not a claim about the table as a whole.
+    const tip = p.label + ' — ' + p.w + '×' + p.h + ' ' + p.aspect
+              + (p.max_secs ? ', up to ' + p.max_secs + 's' : '')
+              + '. Limits last checked ' + p.checked + '.';
+    html += '<div class="soc-row">'
+          +   '<label title="' + escapeAttr(tip) + '">'
+          +     '<input type="checkbox" class="soc-plat" value="' + escapeAttr(p.key) + '" '
+          +            'onchange="onSocPlatformChange()">'
+          +     '<span class="soc-name">' + escapeHtml(p.label) + '</span>'
+          +     '<span class="soc-dims">' + p.w + '×' + p.h + '</span>'
+          +   '</label>';
+    if (p.max_mb !== null && p.max_mb !== undefined) {
+      html += '<input type="text" class="form-control soc-mb-input" '
+            +        'id="socMB-' + escapeAttr(p.key) + '" '
+            +        'value="' + escapeAttr(String(p.max_mb)) + '" '
+            +        'onchange="socPlanSoon()" spellcheck="false" '
+            +        'title="Change this if the limit has moved.">'
+            +  '<span class="soc-mb">MB</span>';
+    }
+    html += '</div>';
+  });
+  box.innerHTML = html;
+}
+
+function renderSocModes(dflt) {
+  const box = document.getElementById('socModes');
+  box.innerHTML = _socModes.map(m =>
+    '<label class="form-check">'
+    + '<input type="radio" name="socMode" value="' + escapeAttr(m.key) + '"'
+    + (m.key === dflt ? ' checked' : '') + ' onchange="socPlanSoon()"> '
+    + escapeHtml(m.label) + '</label>').join('');
+}
+
+function socKeys() {
+  return Array.from(document.querySelectorAll('.soc-plat:checked')).map(c => c.value);
+}
+
+function socMode() {
+  const el = document.querySelector('input[name="socMode"]:checked');
+  return el ? el.value : 'blur';
+}
+
+function socOpts() {
+  // Only send an override when it differs from the preset, so a filename only
+  // gains a size tag when the user genuinely changed something.
+  const sizes = {};
+  _socPresets.forEach(p => {
+    if (p.max_mb === null || p.max_mb === undefined) return;
+    const el = document.getElementById('socMB-' + p.key);
+    if (!el) return;
+    const v = parseFloat(el.value);
+    if (isFinite(v) && v > 0 && v !== p.max_mb) sizes[p.key] = v;
+  });
+  return {
+    reframe:     socMode(),
+    loudness:    document.getElementById('socLoudness').checked,
+    strip_meta:  document.getElementById('socStripMeta').checked,
+    trim_to_fit: document.getElementById('socTrim').checked,
+    cover:       document.getElementById('socCover').checked,
+    folder_per_platform: document.getElementById('socFolderPer').checked,
+    size_mb:     sizes,
+  };
+}
+
+function onSocPlatformChange() { updateSocSummary(); socPlanSoon(); }
+
+// ── Social: files ──
+function socAddPaths(list) {
+  const seen = new Set(_socFiles.map(f => f.path.toLowerCase()));
+  let added = 0, skipped = 0;
+  (list || []).forEach(f => {
+    const path = typeof f === 'string' ? f : f.path;
+    if (!path) return;
+    if (seen.has(path.toLowerCase())) return;
+    // Video only — there is no frame to reframe in an audio file. Checked here
+    // so the user finds out on the drop, not after ticking six platforms.
+    const dot = path.lastIndexOf('.');
+    const ext = dot < 0 ? '' : path.slice(dot).toLowerCase();
+    if (_socVideoExts.length && _socVideoExts.indexOf(ext) < 0) { skipped++; return; }
+    seen.add(path.toLowerCase());
+    _socFiles.push({
+      path: path,
+      name: (typeof f === 'object' && f.name) ? f.name : path.split(/[\\/]/).pop(),
+      size: (typeof f === 'object' && f.size) ? f.size : 0,
+    });
+    added++;
+  });
+  renderSocFiles();
+  return {added: added, skipped: skipped};
+}
+
+async function socAddFiles() {
+  const paths = await api('pick_files', 'video');
+  if (!paths || !paths.length) return;
+  const r = socAddPaths(paths);
+  if (!r.added) appendLog('Those are already in the list.', 'dim');
+  else socPlanSoon();
+}
+
+async function socAddFolder() {
+  const folder = await api('browse_folder');
+  if (!folder) return;
+  // Reuses the Convert tab's folder scan with an mp4 target, which is simply
+  // "find me the videos in here" — then socAddPaths applies the video filter
+  // again, so nothing non-video can slip through either route.
+  const r = await api('scan_convert_folder', folder, 'mp4', false, '', true);
+  if (!r.ok) { appendLog(r.msg, 'err'); return; }
+  const got = socAddPaths(r.files);
+  appendLog('Added ' + got.added + ' video' + (got.added === 1 ? '' : 's')
+            + ' from ' + folder
+            + (got.skipped ? ' (' + got.skipped + ' not video)' : ''), 'info');
+  socPlanSoon();
+}
+
+function socRemove(i) { _socFiles.splice(i, 1); renderSocFiles(); socPlanSoon(); }
+function socClearFiles() { _socFiles = []; renderSocFiles(); hideSocPlan(); }
+
+function renderSocFiles() {
+  const box = document.getElementById('socFiles');
+  box.style.display = _socFiles.length ? '' : 'none';
+  // innerHTML concat, so escaping is not optional: <img onerror=…>.mp4 is a
+  // legal filename.
+  box.innerHTML = _socFiles.map((f, i) =>
+    '<div class="search-row">' +
+      '<span class="search-title" title="' + escapeAttr(f.path) + '">' + escapeHtml(f.name) + '</span>' +
+      '<span class="search-meta">' + (f.size ? fmtBytes(f.size) : '') + '</span>' +
+      '<span class="queue-x" onclick="socRemove(' + i + ')" title="Remove">✕</span>' +
+    '</div>').join('');
+  updateSocSummary();
+}
+
+function updateSocSummary() {
+  const n = _socFiles.length, m = socKeys().length;
+  document.getElementById('socPlatformCount').textContent =
+    m ? m + ' ticked' : 'nothing ticked yet';
+  document.getElementById('socSummary').textContent = !n
+    ? 'No files selected.'
+    : n + ' file' + (n === 1 ? '' : 's') + ' × ' + m + ' platform'
+      + (m === 1 ? '' : 's') + ' = ' + (n * m) + ' video'
+      + (n * m === 1 ? '' : 's') + ' to make';
+}
+
+function onFilesDroppedSocial(d) {
+  const got = socAddPaths(d.files || []);
+  const bits = [];
+  if (got.added)   bits.push('Added ' + got.added + ' video' + (got.added === 1 ? '' : 's'));
+  if (got.skipped) bits.push(got.skipped + ' not video, skipped');
+  if (d.other)     bits.push(d.other + ' not audio, video or an image');
+  if (d.gone)      bits.push(d.gone + ' no longer there');
+  if (d.unresolved) bits.push(d.unresolved + " Windows didn't hand over — use Add Files…");
+  if ((d.folders || []).length) bits.push('drop the videos rather than the folder');
+  if (!bits.length) bits.push('Those are already in the list.');
+  if (got.added) socPlanSoon();
+  showNotice('📂', bits.join(' · '), '', null, 8000);
+}
+
+// ── Social: plan ──
+function hideSocPlan() {
+  document.getElementById('socPlan').style.display = 'none';
+}
+
+// Re-planning costs a header read per file, so coalesce the bursts that come
+// from ticking several platforms in a row.
+function socPlanSoon() {
+  clearTimeout(_socPlanTimer);
+  if (!_socFiles.length || !socKeys().length) { hideSocPlan(); return; }
+  _socPlanTimer = setTimeout(socPlan, 450);
+}
+
+async function socPlan() {
+  clearTimeout(_socPlanTimer);
+  if (!_socFiles.length) { appendLog('Add some videos first.', 'err'); return; }
+  if (!socKeys().length) { appendLog('Tick at least one platform.', 'err'); return; }
+  const box = document.getElementById('socPlan');
+  box.style.display = '';
+  box.innerHTML = '<div class="soc-plan-row">Working it out…</div>';
+  const r = await api('plan_social', _socFiles.map(f => f.path), socKeys(), socOpts());
+  if (!r.ok) box.innerHTML = '<div class="soc-plan-row soc-plan-err">'
+                           + escapeHtml(r.msg) + '</div>';
+  // The rows themselves arrive as a 'social_plan' event, so start listening.
+  else startPolling();
+}
+
+function renderSocialPlan(u) {
+  // Planning is not a queued job, so it never emits the 'done' that normally
+  // stops the poll timer. Without this the bridge keeps getting hit five times
+  // a second for the rest of the session after a single plan. Only stand down
+  // if nothing is actually running — Abort is live exactly while it is.
+  if (document.getElementById('btnAbort').disabled) stopPolling();
+
+  const box = document.getElementById('socPlan');
+  box.style.display = '';
+  if (!u.ok) {
+    box.innerHTML = '<div class="soc-plan-row soc-plan-err">'
+                  + escapeHtml(u.msg || "Couldn't work that out.") + '</div>';
+    return;
+  }
+  const rows = u.rows || [];
+  if (!rows.length) { box.innerHTML = '<div class="soc-plan-row">Nothing to make.</div>'; return; }
+
+  let html = '<div class="soc-plan-row soc-plan-head">'
+           + u.made + ' of ' + u.total + ' ready</div>';
+  let last = null;
+  rows.forEach(row => {
+    const name = (row.src || '').split(/[\\/]/).pop();
+    if (name !== last) {
+      last = name;
+      html += '<div class="soc-plan-row soc-plan-head">' + escapeHtml(name) + '</div>';
+    }
+    const cls = row.ok ? 'soc-plan-row' : 'soc-plan-row soc-plan-err';
+    html += '<div class="' + cls + '">&nbsp;&nbsp;' + escapeHtml(row.label)
+          + ': ' + escapeHtml(row.msg) + '</div>';
+    if (row.warn) {
+      html += '<div class="soc-plan-row soc-plan-warn">&nbsp;&nbsp;&nbsp;&nbsp;'
+            + escapeHtml(row.warn) + '</div>';
+    }
+  });
+  box.innerHTML = html;
+}
+
+// ── Social: run ──
+async function startSocial() {
+  if (!_socFiles.length) { appendLog('Add some videos first.', 'err'); return; }
+  if (!socKeys().length) { appendLog('Tick at least one platform.', 'err'); return; }
+  clearLog();
+  const r = await api('start_social',
+                      _socFiles.map(f => f.path),
+                      document.getElementById('socOutDir').value.trim(),
+                      socKeys(),
+                      socOpts());
+  if (!r.ok) { appendLog(r.msg, 'err'); return; }
+  // Must follow start_social: a batch over 25 outputs asks the user a question
+  // from the worker thread, and that prompt only arrives through this polling.
+  beforeDownload('social');
+}
+
 // ── Log ───────────────────────────────────────────────────────────────────────
 function appendLog(msg, level) {
   const el = document.getElementById('logContent');
@@ -2306,7 +2691,8 @@ function setStatus(msg) {
 async function browseFolder(which) {
   const folder = await api('browse_folder');
   if (!folder) return;
-  const target = {video: 'outputDirVideo', convert: 'convOutDir'}[which] || 'outputDir';
+  const target = {video: 'outputDirVideo', convert: 'convOutDir',
+                  social: 'socOutDir'}[which] || 'outputDir';
   document.getElementById(target).value = folder;
 }
 
@@ -2355,12 +2741,14 @@ function beforeDownload(kind) {
   resetProviders();
   pulseProgress();
   setStatus(kind === 'convert' ? 'Converting…'
+          : kind === 'social'  ? 'Making social cuts…'
           : kind === 'video'   ? 'Downloading video…'
           : 'Downloading…');
-  // Convert is the exception to the above: the file list is a single shared
-  // pile, so a second batch queued mid-run would silently reconvert whatever
-  // is still sitting in it.
+  // Convert and Social are the exception to the above: each owns a single
+  // shared pile of files, so a second batch queued mid-run would silently
+  // redo whatever is still sitting in it.
   if (kind === 'convert') document.getElementById('btnConvert').disabled = true;
+  if (kind === 'social')  document.getElementById('btnSocial').disabled  = true;
   startPolling();
 }
 
@@ -2462,7 +2850,7 @@ function fmtBytes(n) {
 // and never reaches the download tabs — otherwise the button pastes a
 // sentence into the Audio URL box.
 const LOCAL_KINDS = new Set(['convert', 'frames', 'clip', 'sheet', 'fit',
-                             'loudnorm']);
+                             'loudnorm', 'social']);
 
 function fmtClock(s, withCentis) {
   if (!isFinite(s) || s < 0) s = 0;
@@ -3389,6 +3777,7 @@ const LOCAL_KIND_HINT = {
   sheet:   ['history', 'That was a contact sheet — pick the video again to rebuild it.'],
   fit:     ['history', 'That was a resize — pick the video again to redo it.'],
   loudnorm: ['history', 'That was a levelling — pick the file again to redo it.'],
+  social:  ['social', 'That was a social export — pick the videos again to redo it.'],
 };
 
 function redownload(url, kind) {
@@ -3540,6 +3929,7 @@ async function pollUpdates() {
     else if (u.kind === 'history')          renderHistory(u.entries || []);
     else if (u.kind === 'frames_done')      onFramesDone(u);
     else if (u.kind === 'mediaop_done')     onMediaopDone(u);
+    else if (u.kind === 'social_plan')      renderSocialPlan(u);
     else if (u.kind === 'login_state') {
       document.getElementById('btnLogin').disabled = !!u.busy;
       if (u.sites) renderCookies(u.sites);
@@ -3550,6 +3940,7 @@ async function pollUpdates() {
       document.getElementById('btnDownloadAudio').disabled = false;
       document.getElementById('btnDownloadVideo').disabled = false;
       document.getElementById('btnConvert').disabled       = false;
+      document.getElementById('btnSocial').disabled        = false;
       document.getElementById('btnAbort').disabled         = true;
       // Belt and braces: an operation that dies without emitting its own
       // _done event would otherwise leave these buttons disabled forever.
@@ -3708,6 +4099,9 @@ async function init() {
   // Same for the Convert tab's target/quality pairing, which also lays out
   // which Advanced rows apply.
   onConvertTargetChange();
+  // The Social tab's platform list is built from the backend table, so the
+  // pane is empty until this returns.
+  loadSocialPresets();
   if (!d.pillowFound) {
     appendLog('Pillow is missing — image conversion is unavailable ' +
               '(pip install Pillow).', 'warn');

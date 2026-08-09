@@ -29,6 +29,7 @@ import dropfiles
 import history
 import mediaops
 import preview
+import social
 import tags
 from mediaserver import MediaServer
 from providers import (OdesliResolver, QobuzAPI, SpotiflacProxy,
@@ -505,6 +506,12 @@ class API:
         self._media           = MediaServer()
         self._extracting      = False
         self._maximized       = False
+        # Header reads for the Social tab, keyed on identity-plus-mtime-plus-size
+        # so an edited file is never planned against its old dimensions. The
+        # plan-then-encode flow reads every source at least twice, and reticking
+        # one more platform should not re-run a subprocess per file.
+        self._probe_cache: dict = {}
+        self._planning        = False
         # Synchronous-prompt support: worker thread blocks on _prompt_event until JS replies
         self._prompt_event    = threading.Event()
         self._prompt_response = True
@@ -1518,6 +1525,126 @@ class API:
                 "presets": [{"name": n, "i": v[0], "tp": v[1], "lra": v[2]}
                             for n, v in convert.LOUDNORM_PRESETS.items()]}
 
+    # ── Social ───────────────────────────────────────────────────────────────
+
+    def social_presets(self) -> dict:
+        """
+        The platform table and reframe modes for the Social tab.
+
+        Same reason loudness_presets exists: every dimension, duration cap and
+        size limit is read from Python, so the checkbox labelled "1080×1920"
+        and the encoder that produces it cannot drift apart.
+        """
+        return {"ok": True, "presets": social.presets(),
+                "modes": social.reframe_modes(),
+                "default_mode": social.DEFAULT_REFRAME,
+                # So a drop can be filtered to videos in the UI without the
+                # extension list being written down a second time in JS.
+                "video_exts": sorted(e for e, c in convert.CATEGORY_OF_EXT.items()
+                                     if c == "video")}
+
+    def _probe_cached(self, path) -> dict:
+        """probe_full, remembered per (path, mtime, size)."""
+        p = Path(path)
+        try:
+            st = p.stat()
+            key = (str(p), st.st_mtime_ns, st.st_size)
+        except OSError:
+            return convert.probe_full(self._ffmpeg_exe(), p)
+        hit = self._probe_cache.get(key)
+        if hit is None:
+            # Plain bound rather than an LRU: entries are a few hundred bytes
+            # and the access pattern is one burst per batch, so age is a better
+            # eviction signal than recency and not worth the bookkeeping.
+            if len(self._probe_cache) > 200:
+                self._probe_cache.clear()
+            hit = convert.probe_full(self._ffmpeg_exe(), p)
+            self._probe_cache[key] = hit
+        return hit
+
+    def plan_social(self, files: list, keys: list, opts: dict = None) -> dict:
+        """
+        Work out what every (file × platform) pair would produce, off-thread.
+
+        Not on the job queue, deliberately: planning is one header read per
+        source and must stay usable while an encode is running, so putting it
+        there would both block it behind the encode and let it touch
+        _abort_flag. Rows arrive as a 'social_plan' event.
+        """
+        files = [str(f) for f in (files or []) if str(f).strip()]
+        keys = [str(k) for k in (keys or []) if str(k).strip()]
+        if not files:
+            return {"ok": False, "msg": "Add some files first."}
+        if not keys:
+            return {"ok": False, "msg": "Tick at least one platform."}
+        if self._planning:
+            return {"ok": False, "msg": "Still working out the last one…"}
+        if find_ffmpeg() is None:
+            return {"ok": False, "msg": "ffmpeg not found — this needs it."}
+
+        self._planning = True
+        threading.Thread(target=self._plan_social_thread,
+                         args=(files, keys, dict(opts or {})),
+                         daemon=True).start()
+        return {"ok": True, "msg": "Working it out…"}
+
+    def _plan_social_thread(self, files, keys, opts):
+        try:
+            r = social.plan_batch(self._ffmpeg_exe(), files, keys, opts,
+                                  probe=self._probe_cached)
+            # The rows carry a full probe dict each; it is the worker's to
+            # re-derive, not something to push through the bridge on every
+            # plan. Strip it and send only what the panel prints.
+            rows = [{k: v for k, v in row.items() if k != "info"}
+                    for row in r["rows"]]
+            self._emit("social_plan", ok=True, rows=rows, made=r["made"],
+                       total=len(rows))
+        except Exception:
+            if debug_enabled():
+                debug_log(f"social planning crashed\n{traceback.format_exc()}")
+            self._emit("social_plan", ok=False, rows=[], made=0, total=0,
+                       msg="Couldn't work that out.")
+        finally:
+            self._planning = False
+
+    def start_social(self, files: list, out_dir: str, keys: list,
+                     opts: dict = None) -> dict:
+        """Queue one job covering every (file × platform) pair."""
+        opts = dict(opts or {})          # comes from the renderer — copy it
+        files = [str(f) for f in (files or []) if str(f).strip()]
+        keys = [str(k) for k in (keys or []) if str(k).strip()]
+        if not files:
+            return {"ok": False, "msg": "No files selected."}
+        if not keys:
+            return {"ok": False, "msg": "Tick at least one platform."}
+
+        unknown = [k for k in keys if not social.preset(k)]
+        if unknown:
+            return {"ok": False, "msg": f"Unknown platform: {unknown[0]}."}
+        if find_ffmpeg() is None:
+            return {"ok": False, "msg": "ffmpeg not found — this needs it."}
+
+        # Name the offenders rather than failing each one mid-batch. An audio
+        # file has no frame to reframe, so there is nothing to do with it here.
+        bad = [Path(f).name for f in files if preview.kind_of(Path(f)) != "video"]
+        if bad:
+            shown = ", ".join(bad[:3]) + ("…" if len(bad) > 3 else "")
+            return {"ok": False,
+                    "msg": f"Only videos can be resized for social: {shown}"}
+
+        if out_dir:
+            try:
+                Path(out_dir).mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                return {"ok": False, "msg": f"Can't use that output folder: {e}"}
+
+        n, m = len(files), len(keys)
+        label = (f"{Path(files[0]).name} → {social.preset(keys[0])['label']}"
+                 if n == 1 and m == 1
+                 else f"{n} file{'s' if n != 1 else ''} → "
+                      f"{m} platform{'s' if m != 1 else ''}")
+        return self._enqueue("social", label, (files, out_dir, keys, opts))
+
     def _worker_mediaop(self, op: str, src: str, out_dir: str, params: dict):
         """
         Run one queued media operation. Shared by every kind in _MEDIAOPS.
@@ -1770,7 +1897,8 @@ class API:
                 fn = {**{k: self._worker_mediaop for k in _MEDIAOPS},
                       "audio":   self._worker,
                       "video":   self._worker_video,
-                      "convert": self._worker_convert}[job["kind"]]
+                      "convert": self._worker_convert,
+                      "social":  self._worker_social}[job["kind"]]
                 try:
                     fn(*job["args"])
                 except Exception:
@@ -2732,6 +2860,149 @@ class API:
             self._skip_history = True
         else:
             self._log(f"Nothing converted ({summary}).", "err")
+
+    def _worker_social(self, files, out_dir, keys, opts):
+        """
+        Re-shape every file for every ticked platform: N × M outputs, one job.
+
+        One job rather than one per output for the same reason _worker_convert
+        is: history.MAX is 300 and the queue widget shows six rows, so 10 files
+        across 6 platforms would evict the entire download history in a click.
+
+        The bar is divided into one equal slice per surviving unit, and each
+        unit's own stages (measure, analyse, encode, tighten, cover) are
+        remapped inside its slice — so a 12-output batch fills the bar exactly
+        once instead of restarting twelve times.
+        """
+        ffmpeg_exe = self._ffmpeg_exe()
+        opts = dict(opts or {})
+
+        # Plan everything first. Units that cannot be made are reported now and
+        # dropped, so the bar's slices are all real work and it never lurches
+        # when one turns out to be impossible.
+        self._emit("job_status", msg="Working out what to make…")
+        planned = social.plan_batch(ffmpeg_exe, files, keys, opts,
+                                    probe=self._probe_cached)
+        rows, dead = [], set()
+        for row in planned["rows"]:
+            if row["ok"]:
+                rows.append(row)
+                continue
+            name = Path(row["src"]).name
+            # A source that is broken is broken for every platform. Say so once
+            # rather than printing the same sentence six times and burning six
+            # probes to do it.
+            if not row.get("info", {}).get("vcodec"):
+                if row["src"] in dead:
+                    continue
+                dead.add(row["src"])
+                self._log(f"{name}: {row['msg']} — skipping it entirely.", "warn")
+            else:
+                self._log(f"{name} → {row['label']}: {row['msg']}", "warn")
+
+        total = len(rows)
+        if not total:
+            self._log("Nothing could be made from that.", "err")
+            return
+
+        if total > 25 and not self._ask_user(
+                f"That's {total} videos to make from {len(files)} file(s) "
+                f"across {len(keys)} platform(s). Go ahead?"):
+            self._log("Cancelled.", "warn")
+            self._abort_flag = True
+            return
+
+        self._log(f"Making {total} video{'s' if total != 1 else ''} "
+                  f"for {len(keys)} platform{'s' if len(keys) != 1 else ''}…",
+                  "bright")
+
+        # One loudness measurement per (source, trimmed length): the same file
+        # going to six platforms at full length only needs measuring once, but
+        # a trimmed cut is a different piece of audio and must not reuse it.
+        measured: dict = {}
+        done = failed = 0
+        for idx, row in enumerate(rows, 1):
+            if self._abort_flag:
+                break
+            src = Path(row["src"])
+            if row["src"] in dead:
+                continue
+
+            base = (idx - 1) / total * 100
+            span = 100 / total
+            # Bound as defaults: a late-binding closure in a loop would make
+            # every unit report the last slice.
+            def unit_pct(p, base=base, span=span):
+                self._progress(base + (span * p / 100 if p is not None else 0))
+
+            def unit_stage(msg, idx=idx, row=row):
+                self._emit("job_status",
+                           msg=f"{idx} of {total} — {row['label']}: {msg}")
+
+            self._emit("job_status",
+                       msg=f"{idx} of {total} — {src.name} → {row['label']}")
+            self._progress(base)
+
+            mkey = (row["src"], round(row["out_secs"], 2) if row["trimmed"] else 0)
+            try:
+                r = social.render(
+                    ffmpeg_exe, src, row, out_dir, opts,
+                    measured=measured.get(mkey),
+                    on_pct=unit_pct, should_abort=lambda: self._abort_flag,
+                    on_proc=lambda pr: setattr(self, "_convert_proc", pr),
+                    on_stage=unit_stage)
+            except Exception as exc:
+                if debug_enabled():
+                    debug_log(f"social crashed on {src.name} → {row['key']}\n"
+                              f"{traceback.format_exc()}")
+                self._log(f"{src.name} → {row['label']}: {exc}", "err")
+                failed += 1
+                continue
+            finally:
+                self._convert_proc = None
+
+            if r.get("measured") and mkey not in measured:
+                measured[mkey] = r["measured"]
+
+            if r["ok"]:
+                done += 1
+                self._last_file = r["path"]
+                self._log(f"{src.name} → {r['msg']}", "ok")
+                if r.get("cover"):
+                    self._log(f"    cover: {Path(r['cover']).name}", "dim")
+                if r.get("warn"):
+                    self._log(f"    {r['warn']}", "warn")
+            elif self._abort_flag:
+                break
+            else:
+                failed += 1
+                self._log(f"{src.name} → {row['label']}: {r['msg']}", "err")
+                # A source that failed for a reason about the file itself will
+                # fail identically on every remaining platform.
+                if not src.exists():
+                    dead.add(row["src"])
+
+        if self._abort_flag:
+            self._progress(0)
+            # Whatever finished is a finished file and stays on disk; only the
+            # in-flight temp was discarded. Say what survived rather than
+            # letting the user guess.
+            self._log(f"Stopped — {done} of {total} made before you stopped it."
+                      if done else "Stopped.", "warn")
+            return
+
+        bits = [f"{done} made"]
+        if failed:
+            bits.append(f"{failed} failed")
+        summary = ", ".join(bits)
+        if done:
+            self._progress(100)
+            self._log(f"Done: {summary}.", "ok")
+            # Without this the runner records the whole batch as failed no
+            # matter how many files it actually wrote.
+            self._emit("success", path=self._last_file)
+        else:
+            self._log(f"Nothing made ({summary}).", "err")
 
     def _convert_one(self, ffmpeg_exe, src, dst, tmp, cat, target, quality,
                      opts, quality_is_default, idx, total) -> bool:

@@ -198,12 +198,17 @@ def clip(ffmpeg_exe: str, src, start: float, end: float, out_dir: str = "",
     return {"ok": True, "path": str(dst), "msg": msg}
 
 
-def _discard(tmp: Path):
+def discard(tmp: Path):
     """Remove a scratch file, ignoring failure — it is already the sad path."""
     try:
         tmp.unlink()
     except OSError:
         pass
+
+
+# Public since social.py needs the same scratch-file discipline; the private
+# name stays as an alias so the call sites in this file read as they always did.
+_discard = discard
 
 
 # ── Contact sheet ────────────────────────────────────────────────────────────
@@ -333,6 +338,67 @@ def _audio_budget(target_mb: float) -> int:
     return 96_000 if target_mb >= 5 else 64_000
 
 
+def budget_bitrate(target_mb: float, duration: float, ext: str = "mp4",
+                   audio_bps: int = 0) -> dict:
+    """
+    What video bitrate fits `duration` seconds into `target_mb`.
+
+    Pure arithmetic — no file, no probe, no subprocess. That is the whole
+    point of it being separate: the Social tab has to ask this about a file
+    that does not exist yet (reframed, possibly trimmed), while plan_fit asks
+    it about one sitting on disk. One implementation of _SAFETY,
+    _MIN_VIDEO_BPS and the audio reservation, or the two callers drift and
+    only one of them keeps landing under the limit.
+
+    `audio_bps` of 0 means "decide from the target", which is what the size
+    limit alone can tell you. A caller that already knows what its audio will
+    cost passes it and gets the video budget adjusted to match.
+
+    Returns {'ok', 'video_bps', 'audio_bps', 'max_seconds', 'min_mb', 'msg'}.
+    'ok' False means the target cannot be met at a watchable bitrate; 'msg'
+    then explains it in the two terms the user can actually act on.
+    """
+    out = {"ok": False, "video_bps": 0, "audio_bps": 0,
+           "max_seconds": 0.0, "min_mb": 0.0, "msg": ""}
+    try:
+        target_mb, duration = float(target_mb), float(duration)
+    except (TypeError, ValueError):
+        out["msg"] = "Enter a size in MB."
+        return out
+    if target_mb <= 0:
+        out["msg"] = "Enter a size greater than zero."
+        return out
+    if duration <= 0:
+        out["msg"] = "Couldn't read how long that video is."
+        return out
+
+    safety = _SAFETY.get(str(ext).lower().lstrip("."), 0.97)
+    audio_bps = int(audio_bps) or _audio_budget(target_mb)
+    out["audio_bps"] = audio_bps
+
+    usable_bps = target_mb * 8 * _MB * safety
+    video_bps = int(usable_bps / duration) - audio_bps
+
+    # Both figures are worth showing: "too long for that limit" and "that limit
+    # is too small" are the same fact, but a user is only ever able to change
+    # one of them.
+    out["max_seconds"] = usable_bps / (_MIN_VIDEO_BPS + audio_bps)
+    out["min_mb"] = math.ceil(
+        (_MIN_VIDEO_BPS + audio_bps) * duration / (8 * _MB * safety) * 10) / 10
+
+    if video_bps < _MIN_VIDEO_BPS:
+        out["msg"] = (
+            f"{fmt_mb(target_mb)} over {clock_words(duration)} leaves only "
+            f"{max(0, video_bps) // 1000} kbps for video. At that limit you "
+            f"could fit about {clock_words(out['max_seconds'])}; for this "
+            f"video you'd need about {fmt_mb(out['min_mb'])}.")
+        return out
+
+    out["ok"] = True
+    out["video_bps"] = video_bps
+    return out
+
+
 def plan_fit(ffmpeg_exe: str, src, target_mb: float) -> dict:
     """
     Work out whether a size target is achievable, without encoding anything.
@@ -370,34 +436,19 @@ def plan_fit(ffmpeg_exe: str, src, target_mb: float) -> dict:
         out["ok"] = True
         out["fits_already"] = True
         out["msg"] = (f"That's already {out['size'] / _MB:.1f} MB — "
-                      f"under {_fmt_mb(target_mb)}. Nothing to do.")
+                      f"under {fmt_mb(target_mb)}. Nothing to do.")
         return out
 
-    ext = src.suffix.lower().lstrip(".")
-    safety = _SAFETY.get(ext, 0.97)
-    audio_bps = _audio_budget(target_mb)
-    video_bps = int(target_mb * 8 * _MB * safety / duration) - audio_bps
-
-    # Both figures are worth showing: "too long for that limit" and "that limit
-    # is too small" are the same fact, but a user is only ever able to change
-    # one of them.
-    usable_bps = target_mb * 8 * _MB * safety
-    out["max_seconds"] = usable_bps / (_MIN_VIDEO_BPS + audio_bps)
-    out["min_mb"] = math.ceil(
-        (_MIN_VIDEO_BPS + audio_bps) * duration / (8 * _MB * safety) * 10) / 10
-
-    if video_bps < _MIN_VIDEO_BPS:
-        out["msg"] = (
-            f"{_fmt_mb(target_mb)} over {_clock_words(duration)} leaves only "
-            f"{max(0, video_bps) // 1000} kbps for video. At that limit you "
-            f"could fit about {_clock_words(out['max_seconds'])}; for this "
-            f"video you'd need about {_fmt_mb(out['min_mb'])}.")
+    b = budget_bitrate(target_mb, duration, src.suffix)
+    out["max_seconds"], out["min_mb"] = b["max_seconds"], b["min_mb"]
+    if not b["ok"]:
+        out["msg"] = b["msg"]
         return out
 
     out["ok"] = True
-    out["video_bps"] = video_bps
-    out["msg"] = (f"{out['size'] / _MB:.1f} MB → {_fmt_mb(target_mb)} at about "
-                  f"{video_bps // 1000} kbps video.")
+    out["video_bps"] = b["video_bps"]
+    out["msg"] = (f"{out['size'] / _MB:.1f} MB → {fmt_mb(target_mb)} at about "
+                  f"{b['video_bps'] // 1000} kbps video.")
     return out
 
 
@@ -451,6 +502,99 @@ def build_fit_cmds(ffmpeg_exe: str, src, dst, video_bps: int, audio_bps: int,
     return one, two
 
 
+def two_pass_encode(pass1_cmd: list, make_pass2, duration: float, tmp: Path,
+                    limit_bytes: float, video_bps: int, audio_bps: int,
+                    passlog: Path, on_pct=None, should_abort=None,
+                    on_proc=None, on_stage=None) -> dict:
+    """
+    Analyse, encode, measure, and re-run pass 2 once at a corrected bitrate if
+    the first attempt missed `limit_bytes`.
+
+    `make_pass2(video_bps) -> argv` is the seam: this function knows how to
+    land under a number and nothing else. What filters, container or metadata
+    flags the encode carries is the caller's business — fit_under's pass 2 is a
+    plain rescale, social.py's carries a filter_complex and a metadata strip,
+    and neither has to know the other exists.
+
+    Emits absolute 0-100 progress with the analysis pass given the smaller
+    share, because it is genuinely faster than the encode and a straight half
+    would make the bar crawl in the second half.
+
+    On success `tmp` is left on disk for the caller to rename; on any failure
+    or abort it is removed. Returns {'ok', 'size', 'aborted', 'msg'}.
+    """
+    out = {"ok": False, "size": 0, "aborted": False, "msg": ""}
+    try:
+        if on_stage:
+            on_stage("Analysing…")
+        rc, tail = convert.run_ffmpeg(
+            pass1_cmd, duration,
+            on_pct=(lambda p: on_pct(p * 0.45 if p is not None else None))
+            if on_pct else None,
+            should_abort=should_abort, on_proc=on_proc)
+        if rc == -1:
+            out["aborted"] = True
+            out["msg"] = "Stopped."
+            return out
+        if rc != 0:
+            out["msg"] = (tail.splitlines()[-1] if tail
+                          else "The analysis pass failed.")
+            return out
+
+        # x264's two-pass ratecontrol aims at -b:v but does not guarantee it:
+        # measured 587 kbps against a 550 kbps request on hard content, ~7%
+        # over. No fixed safety margin fixes that — too small and the file
+        # misses the limit, too large and every file comes out needlessly
+        # worse. So encode, measure, and if it missed, re-run pass 2 with the
+        # bitrate scaled by exactly how much it missed by. Pass 1's analysis
+        # holds (same source, resolution and preset), so a correction costs
+        # one pass rather than two, and one is always enough in practice.
+        two = make_pass2(video_bps)
+        for attempt in (1, 2):
+            if on_stage:
+                on_stage("Encoding…" if attempt == 1 else "Tightening…")
+            base = 45 if attempt == 1 else 75
+            span = 30 if attempt == 1 else 25
+            rc, tail = convert.run_ffmpeg(
+                two, duration,
+                on_pct=(lambda p, b=base, s=span:
+                        on_pct(b + p * s / 100 if p is not None else None))
+                if on_pct else None,
+                should_abort=should_abort, on_proc=on_proc)
+            if rc == -1:
+                discard(tmp)
+                out["aborted"] = True
+                out["msg"] = "Stopped."
+                return out
+            if rc != 0 or not tmp.exists() or tmp.stat().st_size == 0:
+                discard(tmp)
+                out["msg"] = (tail.splitlines()[-1] if tail
+                              else "ffmpeg couldn't re-encode that.")
+                return out
+
+            got = tmp.stat().st_size
+            if got <= limit_bytes or attempt == 2:
+                break
+            # Scale the *total* budget by the miss, then take audio back off.
+            # The extra 2% stops a second near-miss on a marginal file.
+            total_bps = video_bps + audio_bps
+            video_bps = int(total_bps * (limit_bytes / got) * 0.98) - audio_bps
+            if video_bps < _MIN_VIDEO_BPS:
+                break        # nothing left to give; report what we have
+            two = make_pass2(video_bps)
+    finally:
+        # x264 writes more than the one log it is asked for: "-0.log",
+        # "-0.log.mbtree", and a ".temp" of each while encoding. Globbing the
+        # prefix catches every variant, including any this ffmpeg version adds
+        # later — a hardcoded list quietly leaves files behind instead.
+        for leftover in passlog.parent.glob(passlog.name + "*"):
+            discard(leftover)
+
+    out["ok"] = True
+    out["size"] = tmp.stat().st_size
+    return out
+
+
 def fit_under(ffmpeg_exe: str, src, out_dir: str = "", target_mb: float = 25.0,
               on_pct=None, should_abort=None, on_proc=None,
               on_stage=None) -> dict:
@@ -484,7 +628,7 @@ def fit_under(ffmpeg_exe: str, src, out_dir: str = "", target_mb: float = 25.0,
         return {"ok": False, "path": "", "msg": f"Can't write to that folder: {e}"}
 
     dst = preview.unique_path(
-        folder / f"{preview.safe_stem(src.stem)}_{_mb_tag(target_mb)}.{ext}")
+        folder / f"{preview.safe_stem(src.stem)}_{mb_tag(target_mb)}.{ext}")
     tmp = convert.temp_path(dst)
 
     tmpdir = app_data_dir() / "tmp"
@@ -495,94 +639,37 @@ def fit_under(ffmpeg_exe: str, src, out_dir: str = "", target_mb: float = 25.0,
     passlog = tmpdir / f"fit-{os.getpid()}-{abs(hash(str(src))) % 100000}"
 
     audio_bps = _audio_budget(target_mb)
-    one, two = build_fit_cmds(ffmpeg_exe, src, tmp, plan["video_bps"],
-                              audio_bps, passlog, ext)
-    duration = plan["duration"]
+    one, _ = build_fit_cmds(ffmpeg_exe, src, tmp, plan["video_bps"],
+                            audio_bps, passlog, ext)
 
-    try:
-        # Pass 1 is analysis-only and genuinely faster than the encode, so it
-        # gets the smaller share of the bar rather than a misleading half.
-        if on_stage:
-            on_stage("Analysing…")
-        rc, tail = convert.run_ffmpeg(
-            one, duration,
-            on_pct=(lambda p: on_pct(p * 0.45 if p is not None else None))
-            if on_pct else None,
-            should_abort=should_abort, on_proc=on_proc)
-        if rc == -1:
-            return {"ok": False, "path": "", "msg": "Stopped."}
-        if rc != 0:
-            return {"ok": False, "path": "",
-                    "msg": (tail.splitlines()[-1] if tail
-                            else "The analysis pass failed.")}
+    r = two_pass_encode(
+        one,
+        lambda bps: build_fit_cmds(ffmpeg_exe, src, tmp, bps, audio_bps,
+                                   passlog, ext)[1],
+        plan["duration"], tmp, target_mb * _MB, plan["video_bps"], audio_bps,
+        passlog, on_pct=on_pct, should_abort=should_abort, on_proc=on_proc,
+        on_stage=on_stage)
+    if not r["ok"]:
+        return {"ok": False, "path": "", "msg": r["msg"]}
 
-        # x264's two-pass ratecontrol aims at -b:v but does not guarantee it:
-        # measured 587 kbps against a 550 kbps request on hard content, ~7%
-        # over. No fixed safety margin fixes that — too small and the file
-        # misses the limit, too large and every file comes out needlessly
-        # worse. So encode, measure, and if it missed, re-run pass 2 with the
-        # bitrate scaled by exactly how much it missed by. Pass 1's analysis
-        # holds (same source, resolution and preset), so a correction costs
-        # one pass rather than two, and one is always enough in practice.
-        limit = target_mb * _MB
-        video_bps = plan["video_bps"]
-        for attempt in (1, 2):
-            if on_stage:
-                on_stage("Encoding…" if attempt == 1 else "Tightening…")
-            base = 45 if attempt == 1 else 75
-            span = 30 if attempt == 1 else 25
-            rc, tail = convert.run_ffmpeg(
-                two, duration,
-                on_pct=(lambda p, b=base, s=span:
-                        on_pct(b + p * s / 100 if p is not None else None))
-                if on_pct else None,
-                should_abort=should_abort, on_proc=on_proc)
-            if rc == -1:
-                _discard(tmp)
-                return {"ok": False, "path": "", "msg": "Stopped."}
-            if rc != 0 or not tmp.exists() or tmp.stat().st_size == 0:
-                _discard(tmp)
-                return {"ok": False, "path": "",
-                        "msg": (tail.splitlines()[-1] if tail
-                                else "ffmpeg couldn't re-encode that.")}
-
-            got = tmp.stat().st_size
-            if got <= limit or attempt == 2:
-                break
-            # Scale the *total* budget by the miss, then take audio back off.
-            # The extra 2% stops a second near-miss on a marginal file.
-            total_bps = video_bps + audio_bps
-            video_bps = int(total_bps * (limit / got) * 0.98) - audio_bps
-            if video_bps < _MIN_VIDEO_BPS:
-                break        # nothing left to give; report what we have
-            _, two = build_fit_cmds(ffmpeg_exe, src, tmp, video_bps,
-                                    audio_bps, passlog, ext)
-    finally:
-        # x264 writes more than the one log it is asked for: "-0.log",
-        # "-0.log.mbtree", and a ".temp" of each while encoding. Globbing the
-        # prefix catches every variant, including any this ffmpeg version adds
-        # later — a hardcoded list quietly leaves files behind instead.
-        for leftover in passlog.parent.glob(passlog.name + "*"):
-            _discard(leftover)
-
-    got = tmp.stat().st_size
+    got = r["size"]
     try:
         tmp.replace(dst)
     except OSError as e:
-        _discard(tmp)
+        discard(tmp)
         return {"ok": False, "path": "", "msg": f"Couldn't save it: {e}"}
 
-    msg = f"Saved {dst.name} — {got / _MB:.2f} MB, under {_fmt_mb(target_mb)}"
+    msg = f"Saved {dst.name} — {got / _MB:.2f} MB, under {fmt_mb(target_mb)}"
     if got > target_mb * _MB:
         # Report the miss rather than quietly handing back an oversized file
         # the user is about to try to upload.
         msg = (f"Saved {dst.name} — {got / _MB:.2f} MB, which is still over "
-               f"{_fmt_mb(target_mb)}. This one won't compress that far "
-               f"without going lower; try {_fmt_mb(round(target_mb * 0.85, 1))}.")
+               f"{fmt_mb(target_mb)}. This one won't compress that far "
+               f"without going lower; try {fmt_mb(round(target_mb * 0.85, 1))}.")
     return {"ok": True, "path": str(dst), "msg": msg}
 
 
-def _mb_num(mb: float) -> str:
+def mb_num(mb: float) -> str:
     """
     '25' / '9.5' / '0.05'.
 
@@ -597,14 +684,19 @@ def _mb_num(mb: float) -> str:
     return f"{mb:g}" if mb < 1 else f"{mb:.1f}"
 
 
-def _fmt_mb(mb: float) -> str:
+def fmt_mb(mb: float) -> str:
     """'25 MB' — for sentences."""
-    return f"{_mb_num(mb)} MB"
+    return f"{mb_num(mb)} MB"
 
 
-def _mb_tag(mb: float) -> str:
+def mb_tag(mb: float) -> str:
     """Filename-safe size suffix: 25MB, 9.5MB. No space — it's a filename."""
-    return f"{_mb_num(mb)}MB"
+    return f"{mb_num(mb)}MB"
+
+
+# The app's size-formatting vocabulary, shared with social.py so its sentences
+# round the same way these do. Private aliases keep this file's call sites put.
+_mb_num, _fmt_mb, _mb_tag = mb_num, fmt_mb, mb_tag
 
 
 # ── Loudness normalisation ───────────────────────────────────────────────────
@@ -714,10 +806,13 @@ def normalize(ffmpeg_exe: str, src, out_dir: str = "", preset: str = "streaming"
     return {"ok": True, "path": str(dst), "msg": msg}
 
 
-def _clock_words(secs: float) -> str:
+def clock_words(secs: float) -> str:
     """'4m 20s' — for sentences, where 0:04:20 reads as a timestamp."""
     secs = max(0, int(secs))
     h, m, s = secs // 3600, secs % 3600 // 60, secs % 60
     if h:
         return f"{h}h {m}m"
     return f"{m}m {s}s" if m else f"{s}s"
+
+
+_clock_words = clock_words

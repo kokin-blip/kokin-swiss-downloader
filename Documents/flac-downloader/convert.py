@@ -351,6 +351,16 @@ _RE_PIXFMT = re.compile(
 # The parenthesised group right after a codec name is a profile ("High",
 # "LC", "Baseline") — unless it holds a '/', which makes it the fourcc.
 _RE_PROFILE = re.compile(r"^[A-Za-z0-9_]+\s*\(([^()/]+)\)")
+# "Display Matrix: rotation of -90.00 degrees", printed as stream side data on
+# the lines *after* the Stream line — hence searched against the whole blob
+# rather than the stream line, which is safe because a file with more than one
+# rotated video stream doesn't occur outside a test suite.
+#
+# Case-insensitive with an optional space because ffmpeg has spelled this both
+# "displaymatrix" and "Display Matrix" across versions; 8.1 prints the latter,
+# and matching only the former is a silent no-op rather than an error.
+_RE_ROTATION = re.compile(
+    r"display\s*matrix:\s*rotation of\s*(-?\d+(?:\.\d+)?)\s*degrees", re.I)
 
 _CHANNEL_NAMES = {"mono": 1, "stereo": 2, "2.1": 3, "quad": 4, "4.0": 4,
                   "5.0": 5, "5.1": 6, "6.1": 7, "7.1": 8, "downmix": 2}
@@ -381,11 +391,14 @@ def probe_full(ffmpeg_exe: str, path) -> dict:
     as a real video stream ("Video: mjpeg ... 640x640 ... (attached pic)").
     Such a stream sets has_cover and nothing else — treating it as footage
     would show a music file as a 640x640 video.
+
+    'width'/'height' are the *coded* dimensions, which for phone video are not
+    the dimensions anybody sees — see display_dims().
     """
     out = {
         "duration": 0.0, "format": "", "bitrate": 0, "has_cover": False,
         "vcodec": "", "vprofile": "", "width": 0, "height": 0, "fps": 0.0,
-        "vbitrate": 0, "pix_fmt": "",
+        "vbitrate": 0, "pix_fmt": "", "rotation": 0,
         "acodec": "", "aprofile": "", "sample_rate": 0, "channels": 0,
         "abitrate": 0, "sample_fmt": "",
     }
@@ -401,6 +414,13 @@ def probe_full(ffmpeg_exe: str, path) -> dict:
     m = _RE_FORMAT.search(err)
     if m:
         out["format"] = m.group(1).strip()
+
+    m = _RE_ROTATION.search(err)
+    if m:
+        try:
+            out["rotation"] = int(round(float(m.group(1)))) % 360
+        except ValueError:
+            pass
 
     # The container bitrate lives on the Duration line; a stream's own kb/s
     # appears later, so slice to that line rather than searching the whole blob.
@@ -450,6 +470,22 @@ def probe_full(ffmpeg_exe: str, path) -> dict:
                     out["channels"] = _int(field.split(" ")[0])
                     break
     return out
+
+
+def display_dims(info: dict) -> tuple:
+    """
+    The dimensions a viewer actually sees, given probe_full's coded ones.
+
+    A portrait phone clip is stored 1920x1080 with a rotation flag, not
+    1080x1920 — the pixels really are landscape and the player turns them.
+    ffmpeg applies that rotation itself before any -vf runs, so this changes
+    nothing about an encode; it exists so the *description* of a file matches
+    what the user is looking at. Telling somebody their 9:16 phone video is
+    16:9 and will be letterboxed, when it won't be, is worse than saying
+    nothing.
+    """
+    w, h = _int(info.get("width")), _int(info.get("height"))
+    return (h, w) if abs(_int(info.get("rotation"))) % 180 == 90 else (w, h)
 
 
 def can_stream_copy(target: str, info: dict, opts: dict,
@@ -612,9 +648,10 @@ def loudnorm_preset(opts: dict):
     return LOUDNORM_PRESETS.get(str(opts.get("loudnorm") or "").strip().lower())
 
 
-def _loudnorm_measure_cmd(ffmpeg_exe: str, src, preset) -> list:
+def _loudnorm_measure_cmd(ffmpeg_exe: str, src, preset,
+                          duration_limit: float = 0.0) -> list:
     i, tp, lra = preset
-    return [
+    cmd = [
         ffmpeg_exe, "-hide_banner", "-nostdin",
         # NOT -loglevel warning, which build_cmd uses: loudnorm prints its JSON
         # at info level, so warning suppresses it entirely and every
@@ -622,6 +659,14 @@ def _loudnorm_measure_cmd(ffmpeg_exe: str, src, preset) -> list:
         "-loglevel", "info",
         "-progress", "pipe:1", "-nostats",
         "-i", str(src),
+    ]
+    # Measure only the part that will actually be shipped. Without this, a
+    # 90-second cut of a ten-minute video is normalised against the loudness of
+    # the nine and a half minutes nobody will hear, which is exactly the
+    # mismatch two-pass exists to prevent.
+    if duration_limit and duration_limit > 0:
+        cmd += ["-t", f"{float(duration_limit):.3f}"]
+    return cmd + [
         "-af", f"loudnorm=I={i}:TP={tp}:LRA={lra}:print_format=json",
         "-f", "null", "-",
     ]
@@ -652,15 +697,20 @@ def _parse_loudnorm_json(text: str) -> dict:
 
 
 def measure_loudness(ffmpeg_exe: str, src, preset, total_secs: float = 0.0,
-                     on_pct=None, should_abort=None, on_proc=None) -> dict:
+                     on_pct=None, should_abort=None, on_proc=None,
+                     duration_limit: float = 0.0) -> dict:
     """
     Pass one: measure the file's actual loudness.
 
     Returns the five measured values, or {} if anything at all went wrong —
     the caller then falls back to single-pass, which still normalises, just
     less precisely. Never raises: a failed measurement must not fail the job.
+
+    `duration_limit` measures only the first N seconds, for callers that are
+    going to trim the file to that length anyway. 0 measures all of it.
     """
-    rc, tail = run_ffmpeg(_loudnorm_measure_cmd(ffmpeg_exe, src, preset),
+    rc, tail = run_ffmpeg(_loudnorm_measure_cmd(ffmpeg_exe, src, preset,
+                                                duration_limit),
                           total_secs, on_pct=on_pct,
                           should_abort=should_abort, on_proc=on_proc)
     if rc != 0:
