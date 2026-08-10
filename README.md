@@ -10,19 +10,31 @@ for sites that hide their streams behind JavaScript.
 
 ## Install
 
-Grab **`Swiss.Downloader.exe`** from the
-[latest release](https://github.com/kokin-blip/kokin-swiss-downloader/releases/latest)
-and run it. There's no installer and nothing to set up — ffmpeg and everything
-else is bundled.
+Grab the **`Swiss-Downloader-…-win64.zip`** from the
+[latest release](https://github.com/kokin-blip/kokin-swiss-downloader/releases/latest),
+unzip it anywhere, and run `Swiss Downloader.exe` from inside the folder. There's
+no installer and nothing to set up — ffmpeg, the background-removal model and
+everything else is bundled, and nothing is downloaded at runtime.
+
+Keep the folder together: the exe needs the `_internal` folder beside it.
 
 Windows SmartScreen will likely warn you on first launch (the exe isn't code
 signed). *More info → Run anyway.*
 
-The app checks for updates on startup and can download and install a new
-version itself from the popup.
+The app checks for updates on startup and links you to the new release. It can't
+install one itself any more — see the note below.
 
-> The exe is large (~400 MB) because it bundles a headless browser for the
-> stream-sniffing fallback described below.
+> **Why it's a zip and not a single .exe.** It used to be one file, built with
+> PyInstaller `--onefile`. That mode unpacks the whole bundle into a temp folder
+> *every single time you launch it*, and once the cutout model went in that was
+> 1.45 GB and about two minutes before the window appeared. `--onedir` leaves the
+> files unpacked on disk, so it starts in a couple of seconds instead. The
+> tradeoff is a folder rather than a lone exe, and the loss of one-click
+> self-update until there's a proper installer.
+
+> It's a big download: a headless browser for the stream-sniffing fallback
+> described below, plus a 168 MB neural model so background removal runs entirely
+> on your machine.
 
 ## What it does
 
@@ -110,6 +122,47 @@ and Abort stops the encode immediately. **Advanced** exposes bitrate/CRF,
 resolution, frame rate, sample rate, channels and trimming; anything set there
 turns off fast copy, since you can't rescale and stream-copy at once.
 
+### Photo
+
+Drop in photos and cut the background out of them. The tab is built round what
+you actually want the cutout *for*, not round the cutout itself — pick **Product
+shot** and you get the subject on pure white, squared up, auto-cropped with a
+little room to breathe and a soft shadow under it, which is what a marketplace
+listing wants. The other presets work the same way:
+
+| | |
+|---|---|
+| **Product shot** | cut out, pure white, square, soft shadow |
+| **Product, transparent** | the same framing, transparent, as PNG |
+| **Profile picture** | square, with the room behind you blurred |
+| **Blur the background** | portrait mode, after the fact |
+| **Sticker** | tight cutout with a white contour round it |
+| **Just the cutout** | the subject on transparency, nothing else touched |
+| **New background** | a colour you pick, or a picture of your own |
+| **Just enhance** | no cutting out at all — levels pulled straight |
+
+Picking a preset sets every control below it, and changing one of those turns it
+into an override, so the presets are a starting point rather than a cage.
+Anything the preset didn't decide — background, shape, longest edge, shadow,
+auto levels — is there to change.
+
+The **preview stage** shows the actual cutout against a checkerboard before you
+commit, because edge quality on hair and fur is the whole thing and you can't
+judge it from a description. It works on a downscaled copy, so it keeps up while
+you change your mind — the mask is the only expensive part and it's cached, so
+changing the background, the crop or the size re-composites in milliseconds
+without going near the model again.
+
+A few things it does without being asked: a photo already shot on a plain white
+backdrop gets **Product shot** preselected and says so; a file that already
+carries a cutout is left alone rather than run through the model twice; the
+output format follows the transparency rather than being a choice you can get
+wrong (a JPEG can't hold an alpha channel, so a cutout is always a PNG); and
+nothing is ever enlarged past its own resolution.
+
+Background removal runs entirely on your machine — the model ships inside the
+exe and no image ever leaves it. That model is why the download is large.
+
 ### Settings
 
 - **Output folders** for audio and video (defaults: `~/Music/Swiss Downloads`,
@@ -172,8 +225,22 @@ pip install -r requirements.txt
 build.bat
 ```
 
-`build.bat` fetches ffmpeg, installs the Playwright Chromium, generates the
-icon, and produces `dist\Swiss Downloader.exe`.
+`build.bat` fetches ffmpeg and the 168 MB `u2net.onnx` background-removal model,
+installs the Playwright Chromium, generates the icon, and produces
+`dist\Swiss Downloader\` — a folder, not a single exe (see the note under
+[Install](#install)). The exe inside it is `dist\Swiss Downloader\Swiss Downloader.exe`;
+zip the whole folder to distribute it.
+
+`build.bat --selftest` isn't a thing, but the built exe accepts it:
+`"dist\Swiss Downloader\Swiss Downloader.exe" --selftest` checks that Pillow,
+ffmpeg, the model, rembg and onnxruntime all actually made it into the bundle and
+writes the verdict to `selftest.txt` in the app data folder. CI runs this on
+every release, because a missing `--collect-all` produces a build that looks fine
+until someone opens the Photo tab.
+
+Note that `build.bat` must keep CRLF line endings (`.gitattributes` enforces it).
+cmd.exe mis-parses LF-only batch files and the symptom is a word chopped
+mid-token, like `'aywright' is not recognized`, while still exiting 0.
 
 To run without building:
 
@@ -201,6 +268,7 @@ python grab.py --headful "https://site/watch/whatever/"
 | `app.py` | entry point; creates the pywebview window |
 | `backend.py` | the API exposed to JS — download workers, provider chain, browser grab |
 | `convert.py` | the Convert tab's engine — format registry, ffmpeg driver, Pillow image path |
+| `photo.py` | the Photo tab's engine — recipe table, the cutout/composite pipeline, rembg |
 | `providers.py` | Qobuz, Odesli, MusicBrainz, spotiflac, cover-art lookups |
 | `ui/index.html` | the entire front end |
 | `utils.py` | ffmpeg discovery, FLAC tagging, debug log, notifications |

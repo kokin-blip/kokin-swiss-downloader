@@ -1,0 +1,10 @@
+# Batch files must have CRLF line endings, always.
+#
+# cmd.exe parses a .bat line by line and does not reliably handle bare LF: it
+# mis-tokenises long lines and breaks ^ continuations outright, which surfaces as
+# nonsense like "'aywright' is not recognized" — a word chopped mid-token — while
+# still exiting 0. build.bat was committed LF-only and had exactly this problem,
+# so pin it here rather than relying on whatever core.autocrlf happens to be set
+# to on the machine doing the checkout.
+*.bat text eol=crlf
+*.cmd text eol=crlf

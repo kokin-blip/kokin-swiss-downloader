@@ -58,7 +58,15 @@ def check(proxy: Optional[str] = None) -> Optional[dict]:
 
     if _parse(latest_tag) > _parse(__version__):
         notes = data.get("body", "").strip()
-        # Find the .exe asset for in-app download, if present
+        # Find the .exe asset for in-app download, if present.
+        #
+        # Since v1.11.0 the release asset is a .zip, not a .exe: the build moved
+        # to PyInstaller --onedir because --onefile was re-extracting 1.45 GB to
+        # %TEMP% on every launch and putting time-to-window at ~2 minutes. So
+        # this loop finds nothing, asset_url stays empty, and the UI falls back
+        # to opening the release page — deliberate, and handled, but it does mean
+        # one-click self-update is unavailable until there is an installer or a
+        # swap-the-folder path that can replace files it is currently running.
         asset_url = ""
         for asset in data.get("assets", []):
             if (asset.get("name", "").lower().endswith(".exe")):

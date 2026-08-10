@@ -28,6 +28,7 @@ import convert
 import dropfiles
 import history
 import mediaops
+import photo
 import preview
 import social
 import tags
@@ -512,6 +513,12 @@ class API:
         # one more platform should not re-run a subprocess per file.
         self._probe_cache: dict = {}
         self._planning        = False
+        # Monotonic stamp on every Photo preview render. The stage is driven by
+        # sliders and checkboxes, so renders are superseded constantly; the seq
+        # is what lets a stale one be abandoned mid-flight and discarded on
+        # arrival instead of flickering onto the stage after the newer one.
+        self._photo_seq       = 0
+        self._photo_warming   = False
         # Synchronous-prompt support: worker thread blocks on _prompt_event until JS replies
         self._prompt_event    = threading.Event()
         self._prompt_response = True
@@ -1645,6 +1652,157 @@ class API:
                       f"{m} platform{'s' if m != 1 else ''}")
         return self._enqueue("social", label, (files, out_dir, keys, opts))
 
+    # ── Photo tab ────────────────────────────────────────────────────────────
+
+    def photo_recipes(self) -> dict:
+        """
+        The recipe table, background modes and aspect list for the Photo tab.
+
+        Same reason social_presets exists: no margin, size or colour is written
+        down in JavaScript, so the preset labelled "1600px, square" and the
+        renderer that produces it cannot drift apart.
+        """
+        ready, why = photo.available()
+        return {"ok": True, "recipes": photo.recipes(),
+                "bg_modes": photo.bg_modes(), "aspects": photo.aspects(),
+                "ready": ready, "why": why,
+                # So a drop can be filtered to images in the UI without the
+                # extension list being written down a second time in JS.
+                "image_exts": sorted(e for e, c in convert.CATEGORY_OF_EXT.items()
+                                     if c == "image")}
+
+    def analyse_photo(self, path: str) -> dict:
+        """
+        What kind of photo is this, so the UI can preselect a sensible recipe.
+
+        Synchronous on purpose: it reads a 256px thumbnail and samples its
+        border, which is a few milliseconds. Making it an event would buy
+        nothing and cost the UI a round trip to correlate.
+        """
+        return photo.analyse(str(path or ""))
+
+    def warm_photo(self) -> dict:
+        """
+        Start loading the model, in the background, and say nothing about it.
+
+        Called the first time the tab is opened. Building the session reads a
+        176 MB graph into onnxruntime; doing it here means it has happened by
+        the time anybody has picked a file, instead of stalling the first
+        cutout of every run. Deliberately fire-and-forget — the UI does not
+        wait on it, and render() would build the session itself anyway.
+        """
+        if self._photo_warming:
+            return {"ok": True, "msg": "Already warming."}
+        ready, why = photo.available()
+        if not ready:
+            return {"ok": False, "msg": why}
+        self._photo_warming = True
+
+        def go():
+            try:
+                photo.warm()
+            except Exception:
+                if debug_enabled():
+                    debug_log(f"photo warm-up crashed\n{traceback.format_exc()}")
+            finally:
+                self._photo_warming = False
+
+        threading.Thread(target=go, daemon=True, name="photo-warm").start()
+        return {"ok": True, "msg": "Warming up."}
+
+    def preview_photo(self, path: str, key: str, opts: dict = None) -> dict:
+        """
+        Render one photo at proxy size and hand back a URL for the stage.
+
+        Not on the job queue, deliberately — same reasoning as plan_social:
+        this must stay usable while a batch is running, and putting it there
+        would both block it behind the batch and let it touch _abort_flag.
+        The result arrives as a 'photo_preview' event.
+        """
+        path = str(path or "").strip()
+        if not path:
+            return {"ok": False, "msg": "No photo to preview."}
+        r = photo.resolve(str(key or ""), dict(opts or {}))
+        if not r:
+            return {"ok": False, "msg": f"Unknown preset: {key}."}
+
+        self._photo_seq += 1
+        seq = self._photo_seq
+        threading.Thread(target=self._preview_photo_thread,
+                         args=(path, r, seq), daemon=True,
+                         name="photo-preview").start()
+        return {"ok": True, "seq": seq}
+
+    def _preview_photo_thread(self, path, r, seq):
+        try:
+            res = photo.render(
+                path, r, proxy=photo.PROXY_EDGE,
+                on_stage=lambda m: self._emit("photo_preview", seq=seq,
+                                              stage=m),
+                # A render nobody is waiting for any more should die where it
+                # stands rather than finish work that will be thrown away.
+                should_abort=lambda: seq != self._photo_seq)
+            if seq != self._photo_seq:
+                return                      # superseded; say nothing at all
+            url = ""
+            if res["ok"]:
+                # Drop the previous registration before handing out the new
+                # one: the proxy is a single file that gets overwritten, and a
+                # request still in flight would hold a handle open and make the
+                # next replace fail on Windows. See mediaserver.forget.
+                self._media.forget(res["path"])
+                url = self._media.url_for(res["path"])
+                # The path never changes, so without a cache-buster the webview
+                # would show the first render for ever. It lands in the URL's
+                # decorative trailing segment, which _resolve ignores.
+                if url:
+                    url = f"{url}?v={seq}"
+            self._emit("photo_preview", seq=seq, ok=res["ok"], url=url,
+                       msg=res["msg"], done=True)
+        except Exception:
+            if debug_enabled():
+                debug_log(f"photo preview crashed\n{traceback.format_exc()}")
+            if seq == self._photo_seq:
+                self._emit("photo_preview", seq=seq, ok=False, url="",
+                           msg="Couldn't build that preview.", done=True)
+
+    def start_photo(self, files: list, out_dir: str, key: str,
+                    opts: dict = None) -> dict:
+        """Queue one job covering every selected photo."""
+        opts = dict(opts or {})          # comes from the renderer — copy it
+        files = [str(f) for f in (files or []) if str(f).strip()]
+        if not files:
+            return {"ok": False, "msg": "No photos selected."}
+
+        r = photo.resolve(str(key or ""), opts)
+        if not r:
+            return {"ok": False, "msg": f"Unknown preset: {key}."}
+
+        # Name the offenders rather than failing each one mid-batch.
+        bad = [Path(f).name for f in files
+               if preview.kind_of(Path(f)) != "image"]
+        if bad:
+            shown = ", ".join(bad[:3]) + ("…" if len(bad) > 3 else "")
+            return {"ok": False, "msg": f"Only images can be edited: {shown}"}
+
+        # Checked here rather than per file so a missing model is one clear
+        # sentence before anything starts, not the same error N times.
+        if r.get("cutout"):
+            ready, why = photo.available()
+            if not ready:
+                return {"ok": False, "msg": why}
+
+        if out_dir:
+            try:
+                Path(out_dir).mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                return {"ok": False, "msg": f"Can't use that output folder: {e}"}
+
+        n = len(files)
+        label = (f"{Path(files[0]).name} → {r['label']}" if n == 1
+                 else f"{n} photos → {r['label']}")
+        return self._enqueue("photo", label, (files, out_dir, r))
+
     def _worker_mediaop(self, op: str, src: str, out_dir: str, params: dict):
         """
         Run one queued media operation. Shared by every kind in _MEDIAOPS.
@@ -1898,7 +2056,8 @@ class API:
                       "audio":   self._worker,
                       "video":   self._worker_video,
                       "convert": self._worker_convert,
-                      "social":  self._worker_social}[job["kind"]]
+                      "social":  self._worker_social,
+                      "photo":   self._worker_photo}[job["kind"]]
                 try:
                     fn(*job["args"])
                 except Exception:
@@ -2992,6 +3151,98 @@ class API:
             return
 
         bits = [f"{done} made"]
+        if failed:
+            bits.append(f"{failed} failed")
+        summary = ", ".join(bits)
+        if done:
+            self._progress(100)
+            self._log(f"Done: {summary}.", "ok")
+            # Without this the runner records the whole batch as failed no
+            # matter how many files it actually wrote.
+            self._emit("success", path=self._last_file)
+        else:
+            self._log(f"Nothing made ({summary}).", "err")
+
+    def _worker_photo(self, files, out_dir, r):
+        """
+        Apply one recipe to every selected photo: N outputs, one job.
+
+        One job rather than one per photo for the same reason _worker_social is:
+        history.MAX is 300 and the queue widget shows six rows, so a folder of
+        forty photos would evict the entire download history in a click.
+
+        The bar is divided into one equal slice per photo, and each photo's own
+        stages (find the subject, composite, save) are remapped inside its
+        slice — so a 40-photo batch fills the bar exactly once.
+        """
+        total = len(files)
+        if not total:
+            self._log("No photos to edit.", "err")
+            return
+
+        # Load the model once, before the loop, so its several seconds are spent
+        # under an honest "Warming up" rather than inside the first photo's
+        # slice, where it reads as that photo having hung.
+        if r.get("cutout"):
+            self._emit("job_status", msg="Warming up the background remover…")
+            _, err = photo.get_session()
+            if err:
+                self._log(err, "err")
+                return
+
+        self._log(f"{r['label']}: {total} photo{'s' if total != 1 else ''}…",
+                  "bright")
+
+        done = failed = 0
+        for idx, src in enumerate(files, 1):
+            if self._abort_flag:
+                break
+            name = Path(src).name
+
+            base = (idx - 1) / total * 100
+            span = 100 / total
+            # Bound as defaults: a late-binding closure in a loop would make
+            # every photo report the last slice.
+            def unit_pct(p, base=base, span=span):
+                self._progress(base + (span * p / 100 if p is not None else 0))
+
+            def unit_stage(msg, idx=idx, name=name):
+                self._emit("job_status", msg=f"{idx} of {total} — {name}: {msg}")
+
+            self._emit("job_status", msg=f"{idx} of {total} — {name}")
+            self._progress(base)
+
+            try:
+                res = photo.render(src, r, out_dir,
+                                   on_pct=unit_pct, on_stage=unit_stage,
+                                   should_abort=lambda: self._abort_flag)
+            except Exception as exc:
+                if debug_enabled():
+                    debug_log(f"photo crashed on {name}\n"
+                              f"{traceback.format_exc()}")
+                self._log(f"{name}: {exc}", "err")
+                failed += 1
+                continue
+
+            if res["ok"]:
+                done += 1
+                self._last_file = res["path"]
+                self._log(f"{name} → {res['msg']}", "ok")
+            elif self._abort_flag:
+                break
+            else:
+                failed += 1
+                self._log(f"{name}: {res['msg']}", "err")
+
+        if self._abort_flag:
+            self._progress(0)
+            # Whatever finished is a finished file and stays on disk; only the
+            # in-flight scratch file was discarded.
+            self._log(f"Stopped — {done} of {total} done before you stopped it."
+                      if done else "Stopped.", "warn")
+            return
+
+        bits = [f"{done} done"]
         if failed:
             bits.append(f"{failed} failed")
         summary = ", ".join(bits)

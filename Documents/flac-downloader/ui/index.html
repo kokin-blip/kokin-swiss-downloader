@@ -690,6 +690,111 @@ hr.separator {
 .soc-plan-warn { color: #aa6600; }
 .soc-plan-err  { color: #aa0000; }
 
+/* ── Photo tab ────────────────────────────────────────────────────────────── */
+/* Same 404px cap as .convert-scroll and .social-scroll, for the same reason:
+   the shared log below has to sit at the same height on every tab that shows
+   it. Which is why the preview stage sits *beside* the preset list rather than
+   under it — stacked, the two would not fit in the budget, and the whole point
+   of the stage is that you see the cutout while you are still choosing. */
+/* The run row below is pinned outside this, so the cap is the 404px budget
+   minus that row's height — keeping the shared log at the same height here as
+   on every other tab that shows it. */
+.photo-scroll { max-height: 372px; overflow-y: auto; padding-right: 4px; }
+.photo-run { flex-shrink: 0; padding-top: 4px; border-top: 1px solid var(--win-dark); }
+#photoFiles { max-height: 62px; }
+
+.photo-main {
+  display: grid; grid-template-columns: minmax(0, 1fr) 248px; gap: 8px;
+  align-items: start;
+}
+
+/* Sunken wells. The four insets are written out rather than composing .sunken
+   because that is what every other boxed list here does. */
+#photoRecipes {
+  max-height: 150px; overflow-y: auto; background: var(--win-light);
+  padding: 2px;
+  box-shadow: inset  1px  1px 0 var(--win-darker), inset -1px -1px 0 var(--win-light),
+              inset  2px  2px 0 var(--win-dark),   inset -2px -2px 0 var(--win-lighter);
+}
+.photo-group {
+  font-size: 10px; font-weight: bold; color: var(--win-dark);
+  margin: 3px 0 1px 2px;
+}
+.photo-row { display: flex; align-items: center; gap: 4px; padding: 1px 2px; }
+.photo-row:hover { background: var(--win-lighter); }
+.photo-row label { display: flex; align-items: center; gap: 5px; flex: 1 1 auto;
+                   cursor: default; min-width: 0; }
+.photo-row .photo-name { white-space: nowrap; overflow: hidden;
+                         text-overflow: ellipsis; }
+
+/* The recipe's own sentence, plus whatever analyse() worked out about the
+   photo. Two lines' worth of room so neither truncates into uselessness. */
+.photo-hint {
+  font-size: 10px; color: var(--win-dark); line-height: 1.4;
+  margin-top: 3px; min-height: 27px;
+}
+.photo-smart { color: var(--win-blue); font-weight: bold; }
+
+/* Alpha has to be visible or the cutout can't be judged, and the checkerboard
+   is drawn here in CSS rather than baked into the PNG on purpose: the file on
+   the stage is the file that gets saved, and compositing a checkerboard into
+   it would mean previewing something that never ships. */
+.photo-stage {
+  height: clamp(150px, 24vh, 300px);
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden; position: relative;
+  background: var(--win-dark);
+  box-shadow: inset  1px  1px 0 var(--win-darker), inset -1px -1px 0 var(--win-light),
+              inset  2px  2px 0 var(--win-dark),   inset -2px -2px 0 var(--win-lighter);
+}
+/* The checkerboard belongs to the image, not the stage. On the stage it also
+   fills the letterbox either side of a picture that doesn't match the stage's
+   shape — which makes a product shot on pure white read as transparent, the
+   exact opposite of what the checkerboard is for. */
+.photo-stage img {
+  max-width: 100%; max-height: 100%; display: block;
+  background-color: var(--win-light);
+  background-image:
+    linear-gradient(45deg, var(--win-gray) 25%, transparent 25%,
+                    transparent 75%, var(--win-gray) 75%),
+    linear-gradient(45deg, var(--win-gray) 25%, transparent 25%,
+                    transparent 75%, var(--win-gray) 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 8px 8px;
+}
+.photo-stage-msg {
+  color: var(--win-dark); font-size: 10px; padding: 0 12px;
+  text-align: center; line-height: 1.6;
+  /* The checkerboard behind it would make bare text unreadable. */
+  background: var(--win-gray); box-shadow: 0 0 0 4px var(--win-gray);
+}
+/* Reuses .hist-actions' idiom: a row of tab-like buttons where .on is the
+   pressed one. Two here, so the toggle needs no new visual language. */
+.photo-toggle { display: flex; gap: 4px; align-items: center; margin-top: 4px; }
+.photo-toggle .btn { min-width: 0; flex: 1 1 auto; padding: 2px 4px; }
+.photo-toggle .btn.on {
+  box-shadow: inset 1px 1px 0 var(--win-darker), inset -1px -1px 0 var(--win-light),
+              inset 2px 2px 0 var(--win-dark),   inset -2px -2px 0 var(--win-lighter);
+  font-weight: bold;
+}
+.photo-dims { font-size: 10px; color: var(--win-dark); text-align: center;
+              margin-top: 2px; min-height: 13px; }
+
+.photo-knobs { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.photo-knobs label.chk { display: flex; align-items: center; gap: 4px; }
+.photo-knobs select.form-control { width: auto; }
+.photo-knobs input.num { width: 58px; }
+/* <input type=color> is a Chromium widget — a rounded swatch that reads as a
+   browser that wandered in, the same objection the audio player answers. The
+   colour is typed as hex into an ordinary sunken field, and this is just a
+   bevelled chip showing what that hex looks like. */
+.photo-swatch {
+  width: 21px; height: 21px; flex: 0 0 auto;
+  box-shadow: inset 1px 1px 0 var(--win-darker), inset -1px -1px 0 var(--win-light),
+              inset 2px 2px 0 var(--win-dark);
+}
+.photo-hex { width: 74px; font-family: 'Courier New', monospace; }
+
 /* ── History tab ──────────────────────────────────────────────────────────── */
 /* The pane owns the whole window body here (the shared log/progress area is
    hidden on this tab), so the list flexes and the preview below it is fixed. */
@@ -1031,6 +1136,7 @@ hr.separator {
     <button class="tab-btn"        id="tab-video"    onclick="switchTab('video')">Video</button>
     <button class="tab-btn"        id="tab-convert"  onclick="switchTab('convert')">Convert</button>
     <button class="tab-btn"        id="tab-social"   onclick="switchTab('social')">Social</button>
+    <button class="tab-btn"        id="tab-photo"    onclick="switchTab('photo')">Photo</button>
     <button class="tab-btn"        id="tab-history"  onclick="switchTab('history')">History</button>
     <button class="tab-btn"        id="tab-settings" onclick="switchTab('settings')">Settings</button>
   </div>
@@ -1512,6 +1618,98 @@ hr.separator {
 
       </div>
     </div><!-- /pane-social -->
+
+    <!-- ── PHOTO TAB ─────────────────────────────────────────────────────── -->
+    <div class="tab-pane" id="pane-photo">
+      <div class="photo-scroll">
+
+        <div class="form-group">
+          <label>Photos <span class="label-sm">(the same preset is applied to all of them)</span></label>
+          <div class="flex-row">
+            <button class="btn" onclick="photoAddFiles()">Add Files…</button>
+            <button class="btn" onclick="photoAddFolder()">Add Folder…</button>
+            <button class="btn" onclick="photoClearFiles()" style="min-width:60px">Clear</button>
+          </div>
+          <div class="search-results mt4" id="photoFiles" style="display:none"></div>
+          <div class="label-sm mt4" id="photoSummary">No photos selected.</div>
+        </div>
+
+        <div class="photo-main">
+          <div>
+            <div class="form-group" style="margin-bottom:0">
+              <label>What do you want?</label>
+              <!-- Filled at boot from photo_recipes(); no size, margin or
+                   colour is written down in this file. -->
+              <div id="photoRecipes"></div>
+              <div class="photo-hint" id="photoHint"></div>
+            </div>
+          </div>
+          <div>
+            <div class="photo-stage" id="photoStage">
+              <div class="photo-stage-msg" id="photoStageMsg">Add a photo to see it here.</div>
+              <img id="photoStageImg" style="display:none" alt="">
+            </div>
+            <div class="photo-toggle">
+              <button class="btn" id="photoBtnBefore" onclick="photoShow('before')">Before</button>
+              <button class="btn on" id="photoBtnAfter" onclick="photoShow('after')">After</button>
+            </div>
+            <div class="photo-dims" id="photoDims"></div>
+          </div>
+        </div>
+
+        <hr class="separator">
+
+        <div class="form-group">
+          <label>Behind it</label>
+          <div class="photo-knobs" id="photoBgModes"></div>
+          <div class="photo-knobs mt4" id="photoColorRow">
+            <span class="label-sm">Colour</span>
+            <input type="text" class="form-control photo-hex" id="photoColor" spellcheck="false" value="#ffffff" oninput="onPhotoColor()">
+            <span class="photo-swatch" id="photoSwatch"></span>
+            <span class="label-sm" id="photoImageRow" style="display:none">
+              <button class="btn" onclick="photoPickBg()" style="min-width:0;padding:2px 8px;height:19px">Pick a picture…</button>
+              <span id="photoBgName"></span>
+            </span>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label>Shape and size</label>
+          <div class="photo-knobs">
+            <select class="form-control" id="photoAspect" onchange="photoPreviewSoon()"></select>
+            <span class="label-sm">Longest edge</span>
+            <input type="text" class="form-control num" id="photoSize" spellcheck="false" onchange="photoPreviewSoon()" title="Blank or 0 leaves the size alone. Never enlarges a photo past its own resolution.">
+            <span class="label-sm">px</span>
+            <label class="form-check chk">
+              <input type="checkbox" id="photoShadow" onchange="photoPreviewSoon()"> Soft shadow
+            </label>
+            <label class="form-check chk">
+              <input type="checkbox" id="photoEnhance" onchange="photoPreviewSoon()"> Auto levels
+            </label>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label>Save to <span class="label-sm">(blank = next to each source photo)</span></label>
+          <div class="input-group">
+            <input type="text" class="form-control" id="photoOutDir" spellcheck="false" placeholder="(same folder as the source photo)">
+            <button class="btn" onclick="browseFolder('photo')" style="min-width:70px">Browse…</button>
+          </div>
+        </div>
+
+      </div><!-- /photo-scroll -->
+
+      <!-- Outside the scrolling area on purpose. There is more in this pane than
+           fits the 404px budget every tab's scroll area is held to, and a
+           primary action that scrolls off the bottom is one the user has to go
+           looking for. -->
+      <div class="flex-row mt6 photo-run">
+        <button class="btn" onclick="photoPreview()" style="min-width:100px">Preview</button>
+        <span class="label-sm" id="photoRunHint"></span>
+        <span class="spacer"></span>
+        <button class="btn" id="btnPhoto" onclick="startPhoto()" style="min-width:110px;font-weight:bold">Do it</button>
+      </div>
+    </div><!-- /pane-photo -->
 
     <!-- ── HISTORY TAB ───────────────────────────────────────────────────── -->
     <div class="tab-pane full-height" id="pane-history">
@@ -1999,6 +2197,10 @@ function onFilesDropped(d) {
     onFilesDroppedSocial(d);
     return;
   }
+  if (document.getElementById('tab-photo').classList.contains('active')) {
+    onFilesDroppedPhoto(d);
+    return;
+  }
   const wasEmpty = _convFiles.length === 0;
   let added = convAddPaths(d.files || []);
 
@@ -2073,7 +2275,8 @@ function switchTab(name) {
   // the list plus the player, so frame extraction reports progress on its own
   // inline bar instead of the shared one.
   const out = document.getElementById('outputArea');
-  if (name === 'audio' || name === 'video' || name === 'convert' || name === 'social')
+  if (name === 'audio' || name === 'video' || name === 'convert'
+      || name === 'social' || name === 'photo')
        out.classList.add('active');
   else out.classList.remove('active');
 
@@ -2082,7 +2285,17 @@ function switchTab(name) {
   const dz = document.querySelector('#dropZone .dropzone-inner');
   if (dz) dz.textContent = (name === 'social')
     ? 'Drop videos here to resize for social'
+    : (name === 'photo')
+    ? 'Drop photos here to edit'
     : 'Drop files here to convert';
+
+  // Loading the model takes a few seconds, so start it the moment the tab is
+  // opened rather than when the first cutout is asked for. By the time a photo
+  // has been picked it is already in memory.
+  if (name === 'photo' && !_photoWarmed) { _photoWarmed = true; api('warm_photo'); }
+  // A preview mid-flight is for a stage nobody can see any more. Bumping the
+  // seq makes the backend's should_abort fire and the result get dropped.
+  if (name !== 'photo') { clearTimeout(_photoPrevTimer); _photoSeq++; }
 
   if (name === 'history') refreshHistory();
   else histPausePreview();
@@ -2610,6 +2823,372 @@ async function startSocial() {
   beforeDownload('social');
 }
 
+// ── Photo ─────────────────────────────────────────────────────────────────────
+let _photoFiles = [], _photoRecipes = [], _photoImageExts = [];
+let _photoBgModes = [], _photoAspects = [];
+let _photoBgImage = '', _photoWarmed = false;
+let _photoPrevTimer = null;
+// The newest preview the page has asked for, and the newest it has drawn. The
+// backend stamps every result with its seq; anything older is a render that was
+// superseded while it ran and must not be allowed to flicker onto the stage
+// after the newer one has already landed.
+let _photoSeq = 0, _photoDrawn = 0;
+// The two stage sources, so Before/After is a swap and not a re-render.
+let _photoAfterUrl = '', _photoBeforeUrl = '', _photoShowing = 'after';
+
+async function loadPhotoRecipes() {
+  const r = await api('photo_recipes');
+  if (!r || !r.ok) return;
+  _photoRecipes   = r.recipes || [];
+  _photoBgModes   = r.bg_modes || [];
+  _photoAspects   = r.aspects || [];
+  _photoImageExts = r.image_exts || [];
+  renderPhotoRecipes();
+  renderPhotoBgModes();
+  renderPhotoAspects();
+  // Say it once, at boot, rather than letting every attempt fail separately.
+  if (!r.ready && r.why) appendLog('Photo tab: ' + r.why, 'warn');
+  const first = document.querySelector('.photo-pick');
+  if (first) { first.checked = true; onPhotoRecipeChange(); }
+}
+
+function renderPhotoRecipes() {
+  const box = document.getElementById('photoRecipes');
+  let html = '', group = null;
+  _photoRecipes.forEach(p => {
+    if (p.group !== group) {
+      group = p.group;
+      html += '<div class="photo-group">' + escapeHtml(group) + '</div>';
+    }
+    html += '<div class="photo-row">' +
+              '<label title="' + escapeAttr(p.hint) + '">' +
+                '<input type="radio" name="photoPick" class="photo-pick" ' +
+                       'value="' + escapeAttr(p.key) + '" ' +
+                       'onchange="onPhotoRecipeChange()">' +
+                '<span class="photo-name">' + escapeHtml(p.label) + '</span>' +
+              '</label>' +
+            '</div>';
+  });
+  box.innerHTML = html;
+}
+
+function renderPhotoBgModes() {
+  document.getElementById('photoBgModes').innerHTML = _photoBgModes.map(m =>
+    '<label class="form-check chk">' +
+      '<input type="radio" name="photoBg" value="' + escapeAttr(m.key) + '" ' +
+             'onchange="onPhotoBgChange()"> ' + escapeHtml(m.label) +
+    '</label>').join('');
+}
+
+function renderPhotoAspects() {
+  document.getElementById('photoAspect').innerHTML = _photoAspects.map(a =>
+    '<option value="' + escapeAttr(a.key) + '">' + escapeHtml(a.label) +
+    '</option>').join('');
+}
+
+function photoKey() {
+  const el = document.querySelector('.photo-pick:checked');
+  return el ? el.value : '';
+}
+
+function photoRecipeOf(key) {
+  return _photoRecipes.find(p => p.key === key) || null;
+}
+
+// Picking a preset snaps every secondary control to what that preset means.
+// Without this the presets would be decorative — you'd pick "Product shot" and
+// the colour box would still say whatever the last one did.
+function syncPhotoControls(p) {
+  if (!p) return;
+  const bg = document.querySelector('input[name="photoBg"][value="' + p.bg + '"]');
+  if (bg) bg.checked = true;
+  document.getElementById('photoColor').value   = p.color || '#ffffff';
+  document.getElementById('photoAspect').value  = p.aspect || '';
+  document.getElementById('photoSize').value    = p.size || '';
+  document.getElementById('photoShadow').checked  = !!p.shadow;
+  document.getElementById('photoEnhance').checked = p.enhance === 'auto';
+  onPhotoColor();
+  onPhotoBgChange(true);
+}
+
+function onPhotoRecipeChange() {
+  const p = photoRecipeOf(photoKey());
+  syncPhotoControls(p);
+  updatePhotoHint();
+  updatePhotoSummary();
+  photoPreviewSoon();
+}
+
+// Which knobs are meaningful depends on the background: there is no colour to
+// pick for a transparent one, and no picture to choose unless you asked for one.
+function onPhotoBgChange(quiet) {
+  const mode = photoBg();
+  const isColor = mode === 'color';
+  const isImage = mode === 'image';
+  document.getElementById('photoColorRow').style.display =
+    (isColor || isImage) ? '' : 'none';
+  document.getElementById('photoImageRow').style.display = isImage ? '' : 'none';
+  // A shadow needs something to fall on.
+  const sh = document.getElementById('photoShadow');
+  sh.disabled = (mode === 'none');
+  if (sh.disabled) sh.checked = false;
+  if (!quiet) photoPreviewSoon();
+}
+
+function photoBg() {
+  const el = document.querySelector('input[name="photoBg"]:checked');
+  return el ? el.value : 'none';
+}
+
+function onPhotoColor() {
+  const v = document.getElementById('photoColor').value.trim();
+  // Show the colour rather than shipping <input type="color">, whose rounded
+  // Chromium swatch reads as a browser that wandered into a Win95 window.
+  document.getElementById('photoSwatch').style.background =
+    /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(v) ? v : 'transparent';
+}
+
+async function photoPickBg() {
+  const paths = await api('pick_files', 'image');
+  if (!paths || !paths.length) return;
+  _photoBgImage = paths[0];
+  document.getElementById('photoBgName').textContent =
+    ' ' + _photoBgImage.split(/[\\/]/).pop();
+  photoPreviewSoon();
+}
+
+function photoOpts() {
+  const size = parseInt(document.getElementById('photoSize').value, 10);
+  return {
+    bg:       photoBg(),
+    color:    document.getElementById('photoColor').value.trim(),
+    bg_image: _photoBgImage,
+    aspect:   document.getElementById('photoAspect').value,
+    // 0 rather than null: null would mean "no override" and leave the preset's
+    // figure in place, but an emptied box means the user wants the size left
+    // alone, which is what 0 says to render().
+    size:     isFinite(size) && size > 0 ? size : 0,
+    shadow:   document.getElementById('photoShadow').checked,
+    enhance:  document.getElementById('photoEnhance').checked ? 'auto' : 'none',
+  };
+}
+
+function updatePhotoHint(smart) {
+  const p = photoRecipeOf(photoKey());
+  const bits = [];
+  if (smart) bits.push('<span class="photo-smart">' + escapeHtml(smart) + '</span>');
+  if (p) bits.push(escapeHtml(p.hint));
+  document.getElementById('photoHint').innerHTML = bits.join(' ');
+}
+
+// ── Photo: files ──
+function photoAddPaths(list) {
+  const seen = new Set(_photoFiles.map(f => f.path.toLowerCase()));
+  let added = 0, skipped = 0;
+  (list || []).forEach(f => {
+    const path = typeof f === 'string' ? f : f.path;
+    if (!path) return;
+    if (seen.has(path.toLowerCase())) return;
+    // Images only. Checked here so the user finds out on the drop, not after
+    // choosing a preset and pressing the button.
+    const dot = path.lastIndexOf('.');
+    const ext = dot < 0 ? '' : path.slice(dot).toLowerCase();
+    if (_photoImageExts.length && _photoImageExts.indexOf(ext) < 0) { skipped++; return; }
+    seen.add(path.toLowerCase());
+    _photoFiles.push({
+      path: path,
+      name: (typeof f === 'object' && f.name) ? f.name : path.split(/[\\/]/).pop(),
+      size: (typeof f === 'object' && f.size) ? f.size : 0,
+    });
+    added++;
+  });
+  renderPhotoFiles();
+  return {added: added, skipped: skipped};
+}
+
+async function photoAddFiles() {
+  const paths = await api('pick_files', 'image');
+  if (!paths || !paths.length) return;
+  const r = photoAddPaths(paths);
+  if (!r.added) appendLog('Those are already in the list.', 'dim');
+  else photoAfterAdd();
+}
+
+async function photoAddFolder() {
+  const folder = await api('browse_folder');
+  if (!folder) return;
+  // Reuses the Convert tab's folder scan with a png target, which is simply
+  // "find me the images in here" — then photoAddPaths applies the image filter
+  // again, so nothing non-image can slip through either route.
+  const r = await api('scan_convert_folder', folder, 'png', false, '', true);
+  if (!r.ok) { appendLog(r.msg, 'err'); return; }
+  const got = photoAddPaths(r.files);
+  appendLog('Added ' + got.added + ' image' + (got.added === 1 ? '' : 's')
+            + ' from ' + folder
+            + (got.skipped ? ' (' + got.skipped + ' not an image)' : ''), 'info');
+  photoAfterAdd();
+}
+
+function photoRemove(i) { _photoFiles.splice(i, 1); renderPhotoFiles(); photoAfterAdd(); }
+function photoClearFiles() {
+  _photoFiles = [];
+  renderPhotoFiles();
+  photoStageIdle('Add a photo to see it here.');
+}
+
+function renderPhotoFiles() {
+  const box = document.getElementById('photoFiles');
+  box.style.display = _photoFiles.length ? '' : 'none';
+  // innerHTML concat, so escaping is not optional: <img onerror=…>.png is a
+  // legal filename.
+  box.innerHTML = _photoFiles.map((f, i) =>
+    '<div class="search-row">' +
+      '<span class="search-title" title="' + escapeAttr(f.path) + '">' + escapeHtml(f.name) + '</span>' +
+      '<span class="search-meta">' + (f.size ? fmtBytes(f.size) : '') + '</span>' +
+      '<span class="queue-x" onclick="photoRemove(' + i + ')" title="Remove">✕</span>' +
+    '</div>').join('');
+  updatePhotoSummary();
+}
+
+function updatePhotoSummary() {
+  const n = _photoFiles.length;
+  document.getElementById('photoSummary').textContent = !n
+    ? 'No photos selected.'
+    : n + ' photo' + (n === 1 ? '' : 's') + ' to work on';
+  // Restated next to the button, because the file list is usually scrolled out
+  // of sight by the time you get down there.
+  const p = photoRecipeOf(photoKey());
+  document.getElementById('photoRunHint').textContent =
+    (n && p) ? n + ' × ' + p.label : '';
+}
+
+// Look at the first photo and let it choose the preset. This is the tab's whole
+// claim to being smart, and it only ever fires on an empty list — never
+// second-guess somebody who has already set the tab up.
+async function photoAfterAdd(wasEmpty) {
+  if (wasEmpty && _photoFiles.length) {
+    const a = await api('analyse_photo', _photoFiles[0].path);
+    if (a && a.ok) {
+      if (a.animated) {
+        showNotice('⚠', "That one's animated — pull a frame out in Convert first.",
+                   '', null, 8000);
+      }
+      const pick = document.querySelector('.photo-pick[value="' + a.suggest + '"]');
+      if (pick && !pick.checked) { pick.checked = true; syncPhotoControls(photoRecipeOf(a.suggest)); }
+      updatePhotoHint(a.msg);
+      photoPreviewSoon();
+      return;
+    }
+  }
+  photoPreviewSoon();
+}
+
+function onFilesDroppedPhoto(d) {
+  const wasEmpty = _photoFiles.length === 0;
+  const got = photoAddPaths(d.files || []);
+  const bits = [];
+  if (got.added)   bits.push('Added ' + got.added + ' photo' + (got.added === 1 ? '' : 's'));
+  if (got.skipped) bits.push(got.skipped + ' not an image, skipped');
+  if (d.other)     bits.push(d.other + ' not audio, video or an image');
+  if (d.gone)      bits.push(d.gone + ' no longer there');
+  if (d.unresolved) bits.push(d.unresolved + " Windows didn't hand over — use Add Files…");
+  if ((d.folders || []).length) bits.push('drop the photos rather than the folder');
+  if (!bits.length) bits.push('Those are already in the list.');
+  if (got.added) photoAfterAdd(wasEmpty);
+  showNotice('📂', bits.join(' · '), '', null, 8000);
+}
+
+// ── Photo: the stage ──
+function photoStageIdle(msg) {
+  document.getElementById('photoStageImg').style.display = 'none';
+  const m = document.getElementById('photoStageMsg');
+  m.style.display = '';
+  m.textContent = msg || '';
+  document.getElementById('photoDims').textContent = '';
+  _photoAfterUrl = _photoBeforeUrl = '';
+}
+
+function photoShow(which) {
+  _photoShowing = which;
+  document.getElementById('photoBtnBefore').classList.toggle('on', which === 'before');
+  document.getElementById('photoBtnAfter').classList.toggle('on', which === 'after');
+  const url = which === 'before' ? _photoBeforeUrl : _photoAfterUrl;
+  const img = document.getElementById('photoStageImg');
+  if (!url) { photoStageIdle('Nothing to show yet.'); return; }
+  document.getElementById('photoStageMsg').style.display = 'none';
+  img.style.display = '';
+  img.src = url;
+}
+
+// The stage is driven by radios, checkboxes, a colour field and a size box, so
+// bursts are the norm. 300ms coalesces them without feeling dead — shorter than
+// socPlanSoon's 450ms because a preview costs a Pillow composite, not a
+// subprocess per file.
+function photoPreviewSoon() {
+  clearTimeout(_photoPrevTimer);
+  if (!_photoFiles.length || !photoKey()) return;
+  _photoPrevTimer = setTimeout(photoPreview, 300);
+}
+
+async function photoPreview() {
+  clearTimeout(_photoPrevTimer);
+  if (!_photoFiles.length) { appendLog('Add a photo first.', 'err'); return; }
+  if (!photoKey())         { appendLog('Pick what you want first.', 'err'); return; }
+  const path = _photoFiles[0].path;
+  document.getElementById('photoStageMsg').textContent = 'Working…';
+  const r = await api('preview_photo', path, photoKey(), photoOpts());
+  if (!r || !r.ok) { if (r && r.msg) appendLog(r.msg, 'err'); return; }
+  _photoSeq = r.seq || 0;
+  // The 'before' is the untouched source through the same loopback server the
+  // History previews use — the page is http, so a file: URL is blocked outright.
+  if (!_photoBeforeUrl || _photoBeforeSrc !== path) {
+    _photoBeforeSrc = path;
+    // media_info is what the History tab already uses to turn a path into a
+    // loopback URL; it probes as well, which is a little more than we need but
+    // beats a second method that does the same job.
+    const u = await api('media_info', path);
+    _photoBeforeUrl = (u && u.ok && u.url) ? u.url : '';
+  }
+  // A preview is not a queued job, so nothing else will be polling for its
+  // result. Start the pump; onPhotoPreview stops it again.
+  startPolling();
+}
+let _photoBeforeSrc = '';
+
+function onPhotoPreview(u) {
+  // Stale results are silently dropped: a superseded render must never replace
+  // a newer one that already landed.
+  if ((u.seq || 0) < _photoDrawn) return;
+  if (!u.done) {
+    if ((u.seq || 0) >= _photoSeq && u.stage)
+      document.getElementById('photoStageMsg').textContent = u.stage;
+    return;
+  }
+  _photoDrawn = u.seq || 0;
+  // A preview runs off the job queue and emits no 'done', so without this the
+  // 180ms bridge poll would keep running for the rest of the session — and with
+  // a control firing previews continuously that is not a small leak.
+  if (document.getElementById('btnAbort').disabled) stopPolling();
+  if (!u.ok) { photoStageIdle(u.msg || "Couldn't build that preview."); return; }
+  _photoAfterUrl = u.url || '';
+  photoShow(_photoShowing === 'before' ? 'before' : 'after');
+  document.getElementById('photoDims').textContent = u.msg || '';
+}
+
+// ── Photo: run ──
+async function startPhoto() {
+  if (!_photoFiles.length) { appendLog('Add some photos first.', 'err'); return; }
+  if (!photoKey())         { appendLog('Pick what you want first.', 'err'); return; }
+  clearLog();
+  const r = await api('start_photo',
+                      _photoFiles.map(f => f.path),
+                      document.getElementById('photoOutDir').value.trim(),
+                      photoKey(),
+                      photoOpts());
+  if (!r.ok) { appendLog(r.msg, 'err'); return; }
+  beforeDownload('photo');
+}
+
 // ── Log ───────────────────────────────────────────────────────────────────────
 function appendLog(msg, level) {
   const el = document.getElementById('logContent');
@@ -2692,7 +3271,7 @@ async function browseFolder(which) {
   const folder = await api('browse_folder');
   if (!folder) return;
   const target = {video: 'outputDirVideo', convert: 'convOutDir',
-                  social: 'socOutDir'}[which] || 'outputDir';
+                  social: 'socOutDir', photo: 'photoOutDir'}[which] || 'outputDir';
   document.getElementById(target).value = folder;
 }
 
@@ -2742,13 +3321,15 @@ function beforeDownload(kind) {
   pulseProgress();
   setStatus(kind === 'convert' ? 'Converting…'
           : kind === 'social'  ? 'Making social cuts…'
+          : kind === 'photo'   ? 'Editing photos…'
           : kind === 'video'   ? 'Downloading video…'
           : 'Downloading…');
-  // Convert and Social are the exception to the above: each owns a single
-  // shared pile of files, so a second batch queued mid-run would silently
-  // redo whatever is still sitting in it.
+  // Convert, Social and Photo are the exception to the above: each owns a
+  // single shared pile of files, so a second batch queued mid-run would
+  // silently redo whatever is still sitting in it.
   if (kind === 'convert') document.getElementById('btnConvert').disabled = true;
   if (kind === 'social')  document.getElementById('btnSocial').disabled  = true;
+  if (kind === 'photo')   document.getElementById('btnPhoto').disabled   = true;
   startPolling();
 }
 
@@ -3930,6 +4511,7 @@ async function pollUpdates() {
     else if (u.kind === 'frames_done')      onFramesDone(u);
     else if (u.kind === 'mediaop_done')     onMediaopDone(u);
     else if (u.kind === 'social_plan')      renderSocialPlan(u);
+    else if (u.kind === 'photo_preview')    onPhotoPreview(u);
     else if (u.kind === 'login_state') {
       document.getElementById('btnLogin').disabled = !!u.busy;
       if (u.sites) renderCookies(u.sites);
@@ -3941,6 +4523,7 @@ async function pollUpdates() {
       document.getElementById('btnDownloadVideo').disabled = false;
       document.getElementById('btnConvert').disabled       = false;
       document.getElementById('btnSocial').disabled        = false;
+      document.getElementById('btnPhoto').disabled         = false;
       document.getElementById('btnAbort').disabled         = true;
       // Belt and braces: an operation that dies without emitting its own
       // _done event would otherwise leave these buttons disabled forever.
@@ -4102,6 +4685,9 @@ async function init() {
   // The Social tab's platform list is built from the backend table, so the
   // pane is empty until this returns.
   loadSocialPresets();
+  // Same again for the Photo tab's preset list. Cheap — photo_recipes reads a
+  // table and a find_spec; it never imports rembg.
+  loadPhotoRecipes();
   if (!d.pillowFound) {
     appendLog('Pillow is missing — image conversion is unavailable ' +
               '(pip install Pillow).', 'warn');

@@ -10,3 +10,18 @@ Pillow>=10.0
 # transitively via yt-dlp, but the tag editor makes it load-bearing, and a
 # dependency this app depends on directly should say so itself.
 mutagen>=1.45
+# Background removal in the Photo tab. By far the heaviest thing here: it drags
+# in onnxruntime, numpy, opencv-python-headless, scipy and pymatting (which
+# pulls numba and llvmlite). That is why photo.py imports it inside functions
+# and never at module scope — importing it costs several seconds and loads
+# native DLLs, and the app must start at the same speed for someone who never
+# opens the tab.
+#
+# scikit-image is declared by rembg and imported nowhere in it (verified: rembg
+# imports cv2, pymatting, scipy and jsonschema only, and `import rembg` succeeds
+# with skimage blocked outright). Both build scripts therefore --exclude-module
+# skimage, which also drops imageio, tifffile and networkx.
+#
+# The u2net.onnx model itself is NOT downloaded at runtime: it is bundled and
+# pre-seeded into $U2NET_HOME by photo._seed_model. See photo.py's docstring.
+rembg[cpu]>=2.0.60

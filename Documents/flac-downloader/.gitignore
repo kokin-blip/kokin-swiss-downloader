@@ -8,3 +8,7 @@ dist/
 
 # 96 MB binary — fetched by build.bat / CI workflow instead of committed
 ffmpeg/
+
+# 168 MB background-removal model — fetched by build.bat / CI workflow for the
+# same reason ffmpeg is, and bundled into the exe with --add-data.
+assets/models/
