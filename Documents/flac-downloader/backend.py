@@ -823,7 +823,23 @@ class API:
         threading.Thread(target=_run, daemon=True).start()
 
     def install_update(self, asset_url: str) -> dict:
-        """Download the new .exe in the background, then swap + relaunch on exit."""
+        """
+        Download the release's installer, run it silently, and let it take over.
+
+        Until v1.11.0 this downloaded a new .exe and handed a batch file the job
+        of moving it over the running one, retrying until Windows released the
+        lock. That worked while the app *was* one file. It cannot work now: the
+        build is PyInstaller --onedir, so the app is a folder of 5,000+ files,
+        and replacing a launcher without its matching _internal produces
+        something that won't start.
+
+        So the asset is an Inno Setup installer instead — still a single .exe, so
+        updater.check()'s asset scan needs no change — and replacing files that
+        are currently in use is precisely what installers exist to do. The
+        retry-until-unlocked loop is gone, and so is the relaunch: the installer
+        has CloseApplications and a [Run] entry, so it closes this process,
+        swaps the folder and starts the new build itself.
+        """
         import os, tempfile, subprocess
         import urllib.request
 
@@ -833,15 +849,14 @@ class API:
                            "Running from source — pull the latest code instead."}
         if not asset_url:
             return {"ok": False,
-                    "msg": "This release has no downloadable .exe attached."}
-
-        current = sys.executable  # path to the running Swiss Downloader.exe
+                    "msg": "This release has no installer attached — open the "
+                           "release page and download it manually."}
 
         def _run():
             try:
                 self._emit("update_progress", pct=0, msg="Connecting…")
                 tmp_new = os.path.join(tempfile.gettempdir(),
-                                       "SwissDownloader_update.exe")
+                                       "SwissDownloader_setup.exe")
                 req = urllib.request.Request(
                     asset_url, headers={"User-Agent":
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
@@ -860,26 +875,30 @@ class API:
                                        msg=f"Downloading… {done//1048576} MB"
                                            + (f" / {total//1048576} MB" if total else ""))
 
-                self._emit("update_progress", pct=100,
-                           msg="Download complete. Restarting to install…")
+                # A truncated download is a corrupt installer, and Inno's own
+                # integrity check would report it as something baffling. Catch it
+                # here where the reason is still knowable.
+                got = os.path.getsize(tmp_new)
+                if total and got < total:
+                    raise IOError(f"download stopped at {got // 1048576} MB of "
+                                  f"{total // 1048576} MB")
 
-                # Batch waits for this exe to unlock, swaps it, relaunches, self-deletes.
-                bat = os.path.join(tempfile.gettempdir(),
-                                   "SwissDownloader_update.bat")
-                with open(bat, "w") as f:
-                    f.write(
-                        "@echo off\r\n"
-                        ":retry\r\n"
-                        f'move /Y "{tmp_new}" "{current}" >nul 2>&1\r\n'
-                        "if errorlevel 1 (\r\n"
-                        "  timeout /t 1 /nobreak >nul\r\n"
-                        "  goto retry\r\n"
-                        ")\r\n"
-                        f'start "" "{current}"\r\n'
-                        'del "%~f0"\r\n'
-                    )
-                subprocess.Popen(["cmd", "/c", bat],
-                                 creationflags=0x08000000)  # CREATE_NO_WINDOW
+                self._emit("update_progress", pct=100,
+                           msg="Downloaded. Installing and restarting…")
+
+                # /SILENT rather than /VERYSILENT: it shows a progress window and
+                # nothing else, and an update that replaces 1.5 GB deserves to
+                # look like it is doing something rather than like a hang.
+                # /CLOSEAPPLICATIONS is belt and braces — this process is about
+                # to close itself — but it also covers a second window, and a
+                # close that takes longer than the installer does to start.
+                # /NORESTART: nothing here ever needs a reboot, and the installer
+                # must not be the thing that decides to ask for one.
+                # The installer's own [Run] entry relaunches the app.
+                subprocess.Popen(
+                    [tmp_new, "/SILENT", "/CLOSEAPPLICATIONS",
+                     "/RESTARTAPPLICATIONS", "/NORESTART"],
+                    creationflags=0x08000000)  # CREATE_NO_WINDOW
                 self._emit("update_ready")  # tells JS to close the window
             except Exception as e:
                 self._emit("update_progress", pct=-1,

@@ -78,6 +78,7 @@ jobs:
           PLAYWRIGHT_BROWSERS_PATH: "0"
         run: |
           pyinstaller `
+            --noconfirm `
             --onedir `
             --windowed `
             --name "Swiss Downloader" `
@@ -154,24 +155,29 @@ jobs:
             throw "Self-test failed with exit code $($p.ExitCode) -- see the log above."
           }
 
-      # --onedir ships a folder, and a GitHub release asset is a single file, so
-      # the folder is zipped. Named with the tag so a downloaded zip says which
-      # version it is once it has left the browser.
-      - name: Zip the app folder
+      # --onedir ships a folder, and a GitHub release asset is a single file. An
+      # Inno Setup installer is that single file — and unlike a zip it is a .exe,
+      # which is what updater.py's asset scan looks for, and it can replace files
+      # the running app has locked. See installer.iss.
+      #
+      # Inno Setup 6 is preinstalled on windows-latest, so no install step.
+      - name: Build the installer
         run: |
-          $tag = "${{ github.ref_name }}"
-          Compress-Archive -Path "dist\Swiss Downloader" `
-                           -DestinationPath "dist\Swiss-Downloader-$tag-win64.zip"
-          $mb = [math]::Round((Get-Item "dist\Swiss-Downloader-$tag-win64.zip").Length / 1MB)
-          Write-Output "zip: Swiss-Downloader-$tag-win64.zip ($mb MB)"
+          $ver = (Select-String -Path version.py -Pattern '__version__\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          Write-Output "version.py says: $ver"
+          $tag = "${{ github.ref_name }}" -replace '^v',''
+          # A tag that disagrees with version.py means the app would report one
+          # version while the updater compares another. Fail loudly.
+          if ($ver -ne $tag) { throw "tag v$tag does not match version.py ($ver)" }
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=$ver installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with $LASTEXITCODE" }
+          $setup = "dist\Swiss-Downloader-v$ver-Setup.exe"
+          if (-not (Test-Path $setup)) { throw "no installer produced" }
+          Write-Output "installer: $([math]::Round((Get-Item $setup).Length/1MB)) MB"
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          # NOTE: this is a .zip, not a .exe, so updater.py's in-app install
-          # finds no .exe asset and falls back to opening the release page —
-          # which is correct behaviour, not a break, but the one-click update is
-          # gone until an installer or a zip-swap path exists. See updater.py.
-          files: dist/Swiss-Downloader-*-win64.zip
+          files: dist/Swiss-Downloader-v*-Setup.exe
           # The release body becomes the changelog shown in-app.
           # Edit it on the GitHub Releases page after the tag is pushed.

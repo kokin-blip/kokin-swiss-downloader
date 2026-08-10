@@ -10,27 +10,28 @@ for sites that hide their streams behind JavaScript.
 
 ## Install
 
-Grab the **`Swiss-Downloader-…-win64.zip`** from the
-[latest release](https://github.com/kokin-blip/kokin-swiss-downloader/releases/latest),
-unzip it anywhere, and run `Swiss Downloader.exe` from inside the folder. There's
-no installer and nothing to set up — ffmpeg, the background-removal model and
+Grab **`Swiss-Downloader-…-Setup.exe`** from the
+[latest release](https://github.com/kokin-blip/kokin-swiss-downloader/releases/latest)
+and run it. It installs for your user only, under
+`%LOCALAPPDATA%\Programs\Swiss Downloader`, so there's **no admin prompt** — and
+nothing to configure afterwards: ffmpeg, the background-removal model and
 everything else is bundled, and nothing is downloaded at runtime.
 
-Keep the folder together: the exe needs the `_internal` folder beside it.
+Windows SmartScreen will likely warn you (the installer isn't code signed).
+*More info → Run anyway.*
 
-Windows SmartScreen will likely warn you on first launch (the exe isn't code
-signed). *More info → Run anyway.*
+The app checks for updates on startup, and the **Update Now** button installs
+them for you — it downloads the new installer, runs it silently, and reopens the
+app.
 
-The app checks for updates on startup and links you to the new release. It can't
-install one itself any more — see the note below.
-
-> **Why it's a zip and not a single .exe.** It used to be one file, built with
-> PyInstaller `--onefile`. That mode unpacks the whole bundle into a temp folder
-> *every single time you launch it*, and once the cutout model went in that was
-> 1.45 GB and about two minutes before the window appeared. `--onedir` leaves the
-> files unpacked on disk, so it starts in a couple of seconds instead. The
-> tradeoff is a folder rather than a lone exe, and the loss of one-click
-> self-update until there's a proper installer.
+> **Why an installer rather than a plain .exe.** The app used to be a single file
+> built with PyInstaller `--onefile`. That mode unpacks the whole bundle into a
+> temp folder *every single time you launch it*, and once the cutout model went in
+> that was 1.45 GB per launch and about two minutes before the window appeared.
+> It's now `--onedir`, which leaves the files unpacked on disk and starts in a
+> couple of seconds — but that makes the app a folder of 5,000+ files, and
+> updating a folder whose files Windows has locked is exactly the job an installer
+> does properly. v1.11.0 shipped as a zip for one release while this was built.
 
 > It's a big download: a headless browser for the stream-sniffing fallback
 > described below, plus a 168 MB neural model so background removal runs entirely
@@ -226,10 +227,25 @@ build.bat
 ```
 
 `build.bat` fetches ffmpeg and the 168 MB `u2net.onnx` background-removal model,
-installs the Playwright Chromium, generates the icon, and produces
-`dist\Swiss Downloader\` — a folder, not a single exe (see the note under
-[Install](#install)). The exe inside it is `dist\Swiss Downloader\Swiss Downloader.exe`;
-zip the whole folder to distribute it.
+installs the Playwright Chromium, generates the icon, builds
+`dist\Swiss Downloader\` (a folder, not a single exe — see the note under
+[Install](#install)), and then compiles that folder into
+`dist\Swiss-Downloader-v<version>-Setup.exe`, which is the thing you ship.
+
+The installer step needs Inno Setup 6:
+
+```bat
+winget install --id JRSoftware.InnoSetup
+```
+
+It installs per-user, so `ISCC.exe` lands in `%LOCALAPPDATA%\Programs\Inno Setup 6`
+rather than Program Files and usually isn't on `PATH`; `build.bat` checks both.
+The version is read out of `version.py` and passed to `installer.iss` as
+`/DAppVersion`, so the installer, the app and the updater can't disagree about
+what a build is.
+
+To test the app without installing it, run
+`dist\Swiss Downloader\Swiss Downloader.exe` directly.
 
 `build.bat --selftest` isn't a thing, but the built exe accepts it:
 `"dist\Swiss Downloader\Swiss Downloader.exe" --selftest` checks that Pillow,

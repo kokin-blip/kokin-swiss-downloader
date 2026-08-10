@@ -98,7 +98,12 @@ REM distribution, and note that updater.py's swap-the-exe path assumes one file.
 REM
 REM Keep this list in sync with .github/workflows/release.yml.
 REM ─────────────────────────────────────────────────────────────────────────────
+REM --noconfirm matters more than it looks under --onedir. Without it PyInstaller
+REM refuses to write into a non-empty dist\Swiss Downloader and exits with
+REM "The output directory is not empty", which on a rebuild is EVERY time. It was
+REM survivable under --onefile, where the output is one file it just overwrites.
 pyinstaller ^
+  --noconfirm ^
   --onedir ^
   --windowed ^
   --name "Swiss Downloader" ^
@@ -124,16 +129,89 @@ pyinstaller ^
   --icon icon.ico ^
   app.py
 
+REM Stop here if PyInstaller failed. Without this check the script sails on and
+REM builds an installer around whatever happens to be in dist already — which is
+REM the PREVIOUS version's app folder, stamped with this version's number. That
+REM produces an installer that lies about what is inside it, and it happened.
+if errorlevel 1 (
+  echo.
+  echo ERROR: PyInstaller failed - see the output above.
+  echo Nothing was packaged. Fix the build before running the installer step.
+  pause
+  exit /b 1
+)
+
 echo.
 REM --onedir puts the exe inside a folder of the same name, so the path to check
 REM is one level deeper than it was under --onefile.
-if exist "dist\Swiss Downloader\Swiss Downloader.exe" (
+if not exist "dist\Swiss Downloader\Swiss Downloader.exe" (
+  echo Build may have failed - no exe. Check the output above.
+  pause
+  exit /b 1
+)
+
+REM ── Prove the bundle before packaging it ─────────────────────────────────────
+REM Run the exe we just built. --selftest checks that Pillow, ffmpeg, the cutout
+REM model, rembg and onnxruntime all actually made it in, and writes a report
+REM whose first line is the version the app will report at runtime. That is the
+REM real guard against packaging a stale app under a new version number, and it
+REM catches a broken --collect-all at build time rather than in someone's hands.
+echo.
+echo Self-testing the build...
+"dist\Swiss Downloader\Swiss Downloader.exe" --selftest
+if errorlevel 1 (
+  echo.
+  echo ERROR: the built exe failed its self-test. Something did not get bundled.
+  echo Report: %%LOCALAPPDATA%%\flac-downloader\flac-downloader\selftest.txt
+  pause
+  exit /b 1
+)
+
+REM ── Installer ────────────────────────────────────────────────────────────────
+REM The shipped artifact is an installer, not the folder and not a zip. It is a
+REM single .exe, which is what lets updater.py find it as an asset and what lets
+REM an update replace files the running app has locked. See installer.iss.
+REM
+REM Read the version out of version.py so the installer, the app and the updater
+REM can never disagree about what this build is. The self-test above has already
+REM confirmed the packaged app reports this same number.
+for /f "usebackq tokens=2 delims==" %%V in (`findstr /b "__version__" version.py`) do (
+  for /f "tokens=* delims= " %%W in ("%%~V") do set "APPVER=%%~W"
+)
+set "APPVER=%APPVER:"=%"
+set "APPVER=%APPVER: =%"
+echo Building installer for version %APPVER%...
+
+REM Inno Setup installs per-user by default (no UAC), so ISCC lands in
+REM %LOCALAPPDATA%\Programs and is usually NOT on PATH. Check both.
+set "ISCC="
+if exist "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" set "ISCC=%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"
+if not defined ISCC if exist "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
+if not defined ISCC if exist "%ProgramFiles%\Inno Setup 6\ISCC.exe" set "ISCC=%ProgramFiles%\Inno Setup 6\ISCC.exe"
+if not defined ISCC (
+  echo.
+  echo ERROR: ISCC.exe not found - Inno Setup 6 is not installed.
+  echo   winget install --id JRSoftware.InnoSetup
+  pause
+  exit /b 1
+)
+
+"%ISCC%" /DAppVersion=%APPVER% installer.iss
+if errorlevel 1 (
+  echo.
+  echo ERROR: the installer failed to compile. See the output above.
+  pause
+  exit /b 1
+)
+
+echo.
+if exist "dist\Swiss-Downloader-v%APPVER%-Setup.exe" (
   echo ============================================
-  echo  Done!  dist\Swiss Downloader\ is ready.
-  echo  Run:   "dist\Swiss Downloader\Swiss Downloader.exe"
-  echo  Ship:  zip the whole "dist\Swiss Downloader" folder.
+  echo  Done!
+  echo  Ship:  dist\Swiss-Downloader-v%APPVER%-Setup.exe
+  echo  Test:  "dist\Swiss Downloader\Swiss Downloader.exe"
   echo ============================================
 ) else (
-  echo Build may have failed. Check the output above.
+  echo Installer step reported success but produced no Setup.exe. Check above.
 )
 pause
