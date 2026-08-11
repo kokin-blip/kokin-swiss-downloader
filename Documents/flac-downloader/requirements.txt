@@ -40,4 +40,17 @@ mutagen>=1.45
 #
 # The u2net.onnx model itself is NOT downloaded at runtime: it is bundled and
 # pre-seeded into $U2NET_HOME by photo._seed_model. See photo.py's docstring.
-rembg[cpu]>=2.0.60
+#
+# PINNED, and the pin is load-bearing. This was `>=2.0.60`, which meant the
+# machine running build.bat resolved 2.0.69 while CI resolved 2.0.78 -- so the
+# first CI build failed the self-test with "Couldn't load rembg: No module named
+# 'skimage'" on a tree that builds perfectly by hand.
+#
+# Verified by blocking skimage at import time: 2.0.69 builds an onnxruntime
+# session with skimage absent, 2.0.78 does not. So --exclude-module skimage was
+# correct when it was written and a later rembg quietly invalidated it. 2.0.69 is
+# also the version every release since v1.11.0 was actually built and tested
+# with. Unpinning it again means either dropping the skimage exclusion (which
+# also drags back imageio, tifffile and networkx) or re-verifying the exclusion
+# against the new version.
+rembg[cpu]==2.0.69
