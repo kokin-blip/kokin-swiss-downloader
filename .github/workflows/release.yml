@@ -236,6 +236,13 @@ jobs:
           # applies only to `run:` steps, so an action's own inputs still need the
           # full path from the repo root.
           files: Documents/flac-downloader/dist/Swiss-Downloader-v*-Setup.exe
+          # MUST stay true unless a release is deliberately being promoted.
+          # updater.py asks the API for releases/latest, which returns the newest
+          # NON-prerelease -- so publishing a normal release here immediately
+          # offers it to every existing user as an automatic update. Promote a
+          # build by unticking "pre-release" on the Releases page once it has
+          # actually been run by a person, not by defaulting this to false.
+          prerelease: true
           # The release body becomes the changelog shown in-app.
           # Edit it on the GitHub Releases page after the tag is pushed.
 
@@ -373,14 +380,13 @@ jobs:
           if [ ! -d "$APP" ]; then echo "No .app produced -- refusing to publish."; exit 1; fi
           mb=$(du -sm "$APP" | cut -f1)
           echo "Built app bundle: ${mb} MB"
-          # Deliberately much lower than the Windows job's 900: this bundle
-          # carries no Chromium (see the note above the model step), so a few
-          # hundred MB of the Windows figure simply is not here. The number is
-          # uncalibrated -- no green macOS build has ever reported one -- so it
-          # is set low enough to not false-fail and is only catching a
-          # catastrophically empty bundle. Tighten it once a build reports real
-          # numbers. The two find checks below are the checks with teeth.
-          if [ "$mb" -lt 250 ]; then
+          # Calibrated: the first green build (run 31466191807, v1.13.0) came in
+          # at 845 MB, so 750 leaves ~11% of headroom for dependency drift while
+          # still catching a --collect-all that silently stopped collecting.
+          # Lower than the Windows job's 900 despite the Windows one carrying a
+          # whole Chromium, because that number has its own history -- these two
+          # floors are not meant to agree.
+          if [ "$mb" -lt 750 ]; then
             echo "App bundle is only ${mb} MB -- something large failed to collect."
             exit 1
           fi
@@ -457,3 +463,7 @@ jobs:
         with:
           # Workspace-relative -- see the note on the Windows upload above.
           files: Documents/flac-downloader/dist/Swiss-Downloader-v*-macOS-arm64.dmg
+          # See the Windows upload for why this must stay true. Both jobs target
+          # the same release, so both have to agree -- a false here would undo
+          # the Windows job's true.
+          prerelease: true
