@@ -29,6 +29,9 @@ jobs:
     defaults:
       run:
         working-directory: Documents/flac-downloader
+    env:
+      # Deliberately short and OUTSIDE the workspace -- see the Build exe step.
+      APP_DIST: D:\d
 
     steps:
       - uses: actions/checkout@v4
@@ -94,6 +97,15 @@ jobs:
       # which rembg imports at module scope even when alpha matting is off.
       # skimage is declared by rembg but imported nowhere in it (verified), and
       # excluding it also drops imageio, tifffile and networkx.
+      #
+      # --distpath/--workpath put the output at D:\d instead of inside the
+      # workspace. The runner's workspace prefix is 36 characters longer than a
+      # local checkout, and the deepest bundled Chromium files sit at ~240
+      # characters locally -- so on CI four of them cross Windows' 260-char
+      # MAX_PATH. PyInstaller itself copes; ISCC does not, and fails at the very
+      # end of a full compress with "The system cannot find the path specified",
+      # naming neither the file nor the cause. Measured, not guessed: 0 files
+      # over the limit locally, 4 over it with the CI prefix.
       - name: Build exe
         env:
           PLAYWRIGHT_BROWSERS_PATH: "0"
@@ -102,6 +114,8 @@ jobs:
             --noconfirm `
             --onedir `
             --windowed `
+            --distpath "$env:APP_DIST" `
+            --workpath D:\w `
             --name "Swiss Downloader" `
             --add-data "ui;ui" `
             --add-data "assets\models;assets\models" `
@@ -129,10 +143,11 @@ jobs:
       # whole tree rather than on one file.
       - name: Verify the build produced an app folder
         run: |
-          if (-not (Test-Path "dist\Swiss Downloader\Swiss Downloader.exe")) {
+          $app = "$env:APP_DIST\Swiss Downloader"
+          if (-not (Test-Path "$app\Swiss Downloader.exe")) {
             throw "Build produced no exe -- refusing to publish a release."
           }
-          $mb = [math]::Round(((Get-ChildItem "dist\Swiss Downloader" -Recurse -File |
+          $mb = [math]::Round(((Get-ChildItem $app -Recurse -File |
                                 Measure-Object -Property Length -Sum).Sum / 1MB))
           Write-Output "Built app folder: $mb MB"
           # A build missing the bundled Chromium or the cutout model still
@@ -143,7 +158,7 @@ jobs:
           }
           # The model is a plain file on disk under --onedir, so assert it
           # directly instead of inferring it from the total.
-          $model = "dist\Swiss Downloader\_internal\assets\models\u2net.onnx"
+          $model = "$app\_internal\assets\models\u2net.onnx"
           if (-not (Test-Path $model)) {
             throw "u2net.onnx is not in the bundle -- --add-data did not take."
           }
@@ -156,7 +171,7 @@ jobs:
       # user's hands, which is the only other place they show up.
       - name: Self-test the frozen exe
         run: |
-          $p = Start-Process -FilePath "dist\Swiss Downloader\Swiss Downloader.exe" `
+          $p = Start-Process -FilePath "$env:APP_DIST\Swiss Downloader\Swiss Downloader.exe" `
                              -ArgumentList "--selftest" -PassThru -Wait
           # utils.app_data_dir() is platformdirs.user_data_dir("flac-downloader"),
           # whose second positional is appauthor — so on Windows the name appears
@@ -196,7 +211,16 @@ jobs:
           } else {
             Write-Output "Manual run on ${{ github.ref_name }} -- skipping the tag/version check."
           }
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=$ver installer.iss
+          # PyInstaller no longer writes into the workspace, so dist\ may not
+          # exist here at all -- and installer.iss's OutputDir points at it.
+          New-Item -ItemType Directory -Force dist | Out-Null
+          # /DAppDir overrides installer.iss's default of "dist\Swiss Downloader".
+          # OutputDir stays relative to the .iss, so the installer itself still
+          # lands in dist\ inside the workspace, where the upload glob expects it.
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
+              /DAppVersion=$ver `
+              "/DAppDir=$env:APP_DIST\Swiss Downloader" `
+              installer.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed with $LASTEXITCODE" }
           $setup = "dist\Swiss-Downloader-v$ver-Setup.exe"
           if (-not (Test-Path $setup)) { throw "no installer produced" }

@@ -33,6 +33,16 @@
 #ifndef AppVersion
   #define AppVersion "0.0.0"
 #endif
+; Where PyInstaller's --onedir output lives. build.bat uses the default and needs
+; no change. CI overrides it with /DAppDir=... and builds to a short path,
+; because the runner's workspace prefix is 36 characters longer than a local
+; checkout — enough to push the deepest bundled Chromium files past Windows'
+; 260-char MAX_PATH. ISCC then compresses almost the whole tree and aborts with
+; "The system cannot find the path specified", which names neither the file nor
+; the real cause.
+#ifndef AppDir
+  #define AppDir "dist\Swiss Downloader"
+#endif
 
 [Setup]
 ; A stable AppId is what makes the next release an UPGRADE rather than a second
@@ -89,7 +99,7 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 [Files]
 ; The whole --onedir output. recursesubdirs pulls in _internal, which is where
 ; PyInstaller puts ffmpeg, the ui folder and assets\models\u2net.onnx.
-Source: "dist\Swiss Downloader\*"; DestDir: "{app}"; \
+Source: "{#AppDir}\*"; DestDir: "{app}"; \
     Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
