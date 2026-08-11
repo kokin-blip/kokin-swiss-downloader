@@ -1,0 +1,405 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - "v*"          # triggers on any tag like v1.0.0, v1.2.3, etc.
+  # Every release up to v1.12.0 was built locally by build.bat and uploaded by
+  # hand, and this workflow had never once executed: `gh run list` was empty and
+  # GitHub reported no workflows registered at all.
+  #
+  # The reason was not the trigger. This file used to live at
+  # Documents/flac-downloader/.github/workflows/release.yml, and GitHub only
+  # reads .github/workflows/ at the REPOSITORY ROOT — which for this repo is the
+  # home directory, with the app one level down in Documents/flac-downloader. So
+  # the workflow was invisible, and a tag push could never have started it.
+  #
+  # Hence `defaults.run.working-directory` on both jobs below: the file has to
+  # live at the root, but every command in it has to run in the project.
+  #
+  # workflow_dispatch makes the build runnable on demand, so it can be proven
+  # green without cutting a tag. The publishing steps are gated on
+  # github.ref_type == 'tag', so a manual run builds and self-tests but never
+  # touches a release.
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: Documents/flac-downloader
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller pillow
+
+      - name: Fetch ffmpeg
+        run: |
+          New-Item -ItemType Directory -Force ffmpeg
+          Invoke-WebRequest -Uri https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-tmp
+          Get-ChildItem -Path ffmpeg-tmp -Recurse -Filter ffmpeg.exe | Select-Object -First 1 | Copy-Item -Destination ffmpeg\ffmpeg.exe
+          Remove-Item -Recurse -Force ffmpeg-tmp
+
+      # PLAYWRIGHT_BROWSERS_PATH=0 installs Chromium INSIDE the playwright
+      # package so --collect-all picks it up; the app sets the same variable at
+      # runtime when frozen. Without this the browser-grab and site sign-in
+      # fallbacks are dead in the shipped exe.
+      - name: Install Playwright Chromium
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: "0"
+        run: |
+          python -m playwright install chromium
+
+      # Same treatment as ffmpeg: a 168 MB binary fetched rather than committed,
+      # then bundled with --add-data. photo._seed_model copies it out of the exe
+      # into %LOCALAPPDATA% and points $U2NET_HOME at it, so the shipped app
+      # never downloads a model at runtime. The size check catches a truncated
+      # download here rather than in a user's hands.
+      - name: Fetch the background-removal model
+        run: |
+          New-Item -ItemType Directory -Force assets\models
+          Invoke-WebRequest -Uri https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx -OutFile assets\models\u2net.onnx
+          $mb = [math]::Round((Get-Item "assets\models\u2net.onnx").Length / 1MB)
+          Write-Output "u2net.onnx: $mb MB"
+          if ($mb -lt 150) { throw "u2net.onnx is only $mb MB -- truncated download." }
+
+      - name: Generate icon
+        run: python make_icon.py
+
+      # Keep these flags in sync with build.bat. curl_cffi provides the TLS
+      # impersonation that gets past HTTP 410 fingerprint blocks, and playwright
+      # carries the bundled browser; dropping either produces an exe that looks
+      # fine until it silently fails on the sites those exist for.
+      #
+      # --collect-all PIL was previously missing here while build.bat had it, so
+      # the exe tested locally was not built from the same list as the one this
+      # workflow publishes. Added rather than removed: dropping it is the change
+      # that can only be validated by a full release build.
+      #
+      # The rembg block is the Photo tab. onnxruntime matters most — its
+      # inference DLLs live in onnxruntime\capi where PyInstaller's static
+      # analysis does not find them. numba and llvmlite arrive via pymatting,
+      # which rembg imports at module scope even when alpha matting is off.
+      # skimage is declared by rembg but imported nowhere in it (verified), and
+      # excluding it also drops imageio, tifffile and networkx.
+      - name: Build exe
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: "0"
+        run: |
+          pyinstaller `
+            --noconfirm `
+            --onedir `
+            --windowed `
+            --name "Swiss Downloader" `
+            --add-data "ui;ui" `
+            --add-data "assets\models;assets\models" `
+            --add-binary "ffmpeg\ffmpeg.exe;ffmpeg" `
+            --collect-all pywebview `
+            --collect-all mutagen `
+            --collect-all curl_cffi `
+            --collect-all playwright `
+            --collect-all PIL `
+            --collect-all rembg `
+            --collect-all onnxruntime `
+            --collect-all numpy `
+            --collect-all cv2 `
+            --collect-all scipy `
+            --collect-all pymatting `
+            --collect-all numba `
+            --collect-all llvmlite `
+            --collect-all pooch `
+            --exclude-module skimage `
+            --exclude-module matplotlib `
+            --icon icon.ico `
+            app.py
+
+      # --onedir means the artifact is a FOLDER, so size is measured across the
+      # whole tree rather than on one file.
+      - name: Verify the build produced an app folder
+        run: |
+          if (-not (Test-Path "dist\Swiss Downloader\Swiss Downloader.exe")) {
+            throw "Build produced no exe -- refusing to publish a release."
+          }
+          $mb = [math]::Round(((Get-ChildItem "dist\Swiss Downloader" -Recurse -File |
+                                Measure-Object -Property Length -Sum).Sum / 1MB))
+          Write-Output "Built app folder: $mb MB"
+          # A build missing the bundled Chromium or the cutout model still
+          # succeeds but comes out a few hundred MB lighter, which is the cheap
+          # signal that one of the --collect-all flags silently stopped working.
+          if ($mb -lt 900) {
+            throw "App folder is only $mb MB -- the browser or the cutout model is probably missing."
+          }
+          # The model is a plain file on disk under --onedir, so assert it
+          # directly instead of inferring it from the total.
+          $model = "dist\Swiss Downloader\_internal\assets\models\u2net.onnx"
+          if (-not (Test-Path $model)) {
+            throw "u2net.onnx is not in the bundle -- --add-data did not take."
+          }
+          Write-Output "model: $([math]::Round((Get-Item $model).Length / 1MB)) MB"
+
+      # Size is a proxy; this actually runs the thing. --selftest exercises the
+      # three failures --collect-all breaks silently and a size check cannot see:
+      # rembg absent, onnxruntime's native DLLs absent, and the .onnx not landing
+      # where _MEIPASS puts it. Catching those here beats catching them in a
+      # user's hands, which is the only other place they show up.
+      - name: Self-test the frozen exe
+        run: |
+          $p = Start-Process -FilePath "dist\Swiss Downloader\Swiss Downloader.exe" `
+                             -ArgumentList "--selftest" -PassThru -Wait
+          # utils.app_data_dir() is platformdirs.user_data_dir("flac-downloader"),
+          # whose second positional is appauthor — so on Windows the name appears
+          # TWICE: %LOCALAPPDATA%\flac-downloader\flac-downloader. Long-standing
+          # behaviour and not worth changing (every user's history and settings
+          # live there), but the path has to be written correctly here or this
+          # step silently prints nothing. Globbed rather than hardcoded so it
+          # survives if that ever is changed.
+          $log = Get-ChildItem -Path $env:LOCALAPPDATA -Recurse -Filter "selftest.txt" `
+                               -ErrorAction SilentlyContinue | Select-Object -First 1
+          # -Encoding utf8 because app.py writes the report as UTF-8 and
+          # Get-Content otherwise decodes it as ANSI, turning every em-dash into
+          # mojibake in the CI log.
+          if ($log) { Write-Output "--- $($log.FullName) ---"; Get-Content $log.FullName -Encoding utf8 }
+          else { Write-Output "(no selftest.txt found)" }
+          if ($p.ExitCode -ne 0) {
+            throw "Self-test failed with exit code $($p.ExitCode) -- see the log above."
+          }
+
+      # --onedir ships a folder, and a GitHub release asset is a single file. An
+      # Inno Setup installer is that single file — and unlike a zip it is a .exe,
+      # which is what updater.py's asset scan looks for, and it can replace files
+      # the running app has locked. See installer.iss.
+      #
+      # Inno Setup 6 is preinstalled on windows-latest, so no install step.
+      - name: Build the installer
+        run: |
+          $ver = (Select-String -Path version.py -Pattern '__version__\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          Write-Output "version.py says: $ver"
+          # A tag that disagrees with version.py means the app would report one
+          # version while the updater compares another. Fail loudly -- but only
+          # on a tag build, since a workflow_dispatch run has a branch name here
+          # ("main"), which would never match and would fail every manual run.
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $tag = "${{ github.ref_name }}" -replace '^v',''
+            if ($ver -ne $tag) { throw "tag v$tag does not match version.py ($ver)" }
+          } else {
+            Write-Output "Manual run on ${{ github.ref_name }} -- skipping the tag/version check."
+          }
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=$ver installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with $LASTEXITCODE" }
+          $setup = "dist\Swiss-Downloader-v$ver-Setup.exe"
+          if (-not (Test-Path $setup)) { throw "no installer produced" }
+          Write-Output "installer: $([math]::Round((Get-Item $setup).Length/1MB)) MB"
+
+      # Only on a tag. A manual run builds and self-tests, then stops -- there is
+      # no release for it to attach to, and inventing one would be worse.
+      - name: Upload to GitHub Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          # Workspace-relative, NOT project-relative: defaults.run.working-directory
+          # applies only to `run:` steps, so an action's own inputs still need the
+          # full path from the repo root.
+          files: Documents/flac-downloader/dist/Swiss-Downloader-v*-Setup.exe
+          # The release body becomes the changelog shown in-app.
+          # Edit it on the GitHub Releases page after the tag is pushed.
+
+  # ── macOS, Apple Silicon ────────────────────────────────────────────────────
+  #
+  # `needs: build-windows` is not a build dependency -- the two share no files.
+  # It serialises them, so both jobs never write release assets at the same time,
+  # and so a broken Windows build does not publish half a release.
+  #
+  # arm64 only (macos-latest is Apple Silicon). An x86_64 build would need the
+  # macos-13 runner, and a true universal2 build is not achievable here because
+  # onnxruntime and friends do not publish universal2 wheels.
+  build-macos:
+    runs-on: macos-latest
+    needs: build-windows
+    defaults:
+      run:
+        working-directory: Documents/flac-downloader
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # requirements.txt carries `pywebview[cocoa]; sys_platform == "darwin"`,
+      # which is what pulls the pyobjc bindings the Cocoa backend needs. Without
+      # that marker `import webview` still succeeds and the app then fails to
+      # open a window -- see the backend check in app.py's --selftest.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller pillow
+
+      # gyan.dev is Windows-only, so the macOS binary comes from ffmpeg-static's
+      # releases. Pinned to a tag rather than "latest": an ffmpeg that changes
+      # under us is a bad thing to discover from a user's failed convert.
+      - name: Fetch ffmpeg (arm64)
+        run: |
+          mkdir -p ffmpeg
+          curl -fL --retry 3 -o ffmpeg/ffmpeg \
+            https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-arm64
+          chmod +x ffmpeg/ffmpeg
+          mb=$(( $(stat -f%z ffmpeg/ffmpeg) / 1048576 ))
+          echo "ffmpeg: ${mb} MB"
+          if [ "$mb" -lt 40 ]; then echo "ffmpeg is only ${mb} MB -- truncated download."; exit 1; fi
+          # Proves it is executable AND the right architecture. A wrong-arch
+          # binary downloads and chmods perfectly and only fails at runtime.
+          ./ffmpeg/ffmpeg -version | head -n 1
+          file ffmpeg/ffmpeg
+
+      - name: Install Playwright Chromium
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: "0"
+        run: python -m playwright install chromium
+
+      - name: Fetch the background-removal model
+        run: |
+          mkdir -p assets/models
+          curl -fL --retry 3 -o assets/models/u2net.onnx \
+            https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx
+          mb=$(( $(stat -f%z assets/models/u2net.onnx) / 1048576 ))
+          echo "u2net.onnx: ${mb} MB"
+          if [ "$mb" -lt 150 ]; then echo "u2net.onnx is only ${mb} MB -- truncated download."; exit 1; fi
+
+      # PyInstaller wants .icns on macOS. make_icon.py --iconset emits the PNG
+      # set from the same make_frame() the .ico uses, and iconutil (shipped with
+      # macOS) turns it into the container.
+      - name: Generate icon
+        run: |
+          python make_icon.py --iconset
+          iconutil -c icns icon.iconset -o icon.icns
+          ls -la icon.icns
+
+      # Same flag list as the Windows job -- keep the three in sync (build.bat
+      # too). The differences are forced by the platform:
+      #   * ":" not ";" as the --add-data / --add-binary separator
+      #   * icon.icns not icon.ico
+      #   * --osx-bundle-identifier, which macOS uses to identify the app
+      - name: Build app bundle
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: "0"
+        run: |
+          pyinstaller \
+            --noconfirm \
+            --onedir \
+            --windowed \
+            --name "Swiss Downloader" \
+            --add-data "ui:ui" \
+            --add-data "assets/models:assets/models" \
+            --add-binary "ffmpeg/ffmpeg:ffmpeg" \
+            --collect-all pywebview \
+            --collect-all mutagen \
+            --collect-all curl_cffi \
+            --collect-all playwright \
+            --collect-all PIL \
+            --collect-all rembg \
+            --collect-all onnxruntime \
+            --collect-all numpy \
+            --collect-all cv2 \
+            --collect-all scipy \
+            --collect-all pymatting \
+            --collect-all numba \
+            --collect-all llvmlite \
+            --collect-all pooch \
+            --exclude-module skimage \
+            --exclude-module matplotlib \
+            --icon icon.icns \
+            --osx-bundle-identifier com.kokin.swiss-downloader \
+            app.py
+
+      - name: Verify the build produced an app bundle
+        run: |
+          APP="dist/Swiss Downloader.app"
+          if [ ! -d "$APP" ]; then echo "No .app produced -- refusing to publish."; exit 1; fi
+          mb=$(du -sm "$APP" | cut -f1)
+          echo "Built app bundle: ${mb} MB"
+          # Same cheap signal as the Windows job: a bundle missing Chromium or
+          # the cutout model still builds, just hundreds of MB lighter. This
+          # threshold is a first guess -- tighten it once a green build reports
+          # a real number, the way the Windows job's 900 was set.
+          if [ "$mb" -lt 700 ]; then
+            echo "App bundle is only ${mb} MB -- the browser or the cutout model is probably missing."
+            exit 1
+          fi
+          # Located with find rather than a hardcoded path: PyInstaller splits a
+          # .app into Contents/Resources and Contents/Frameworks and symlinks
+          # between them, and which side the model lands on is a PyInstaller
+          # implementation detail this check should not depend on.
+          found=$(find "$APP" -name u2net.onnx | head -n 1)
+          if [ -z "$found" ]; then echo "u2net.onnx is not in the bundle -- --add-data did not take."; exit 1; fi
+          echo "model: $found ($(( $(stat -f%z "$found") / 1048576 )) MB)"
+
+      # The real gate, and the only one that runs actual code. It proves ffmpeg
+      # resolves through _MEIPASS, the model loads through a live onnxruntime
+      # session, and -- since v1.13.0 -- that the Cocoa backend imports, which
+      # is the difference between "the app exists" and "the app can open a
+      # window". Especially important here: nobody on this project has a Mac to
+      # check by hand.
+      - name: Self-test the app bundle
+        run: |
+          set +e
+          "dist/Swiss Downloader.app/Contents/MacOS/Swiss Downloader" --selftest
+          rc=$?
+          set -e
+          report=$(find "$HOME/Library/Application Support" -name selftest.txt 2>/dev/null | head -n 1)
+          if [ -n "$report" ]; then echo "--- $report ---"; cat "$report"; else echo "(no selftest.txt found)"; fi
+          if [ "$rc" -ne 0 ]; then echo "Self-test failed with exit code $rc -- see the log above."; exit 1; fi
+
+      # Ad-hoc signing (`-` as the identity). This is not notarization: users
+      # still get a Gatekeeper warning on first launch, and the release notes
+      # carry the "Open Anyway / xattr -cr" instructions. It is free, and arm64
+      # macOS refuses to run binaries carrying no signature at all, so this is
+      # the floor rather than a nicety.
+      - name: Sign the app bundle (ad-hoc)
+        run: |
+          codesign --force --deep --sign - "dist/Swiss Downloader.app"
+          codesign --verify --verbose "dist/Swiss Downloader.app"
+
+      # ditto, not cp -R: it preserves extended attributes and the signature we
+      # just applied, which cp is not guaranteed to do.
+      - name: Build the DMG
+        run: |
+          ver=$(python -c "import re;print(re.search(r'__version__\s*=\s*\"([^\"]+)\"', open('version.py').read()).group(1))")
+          echo "version.py says: $ver"
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            if [ "$ver" != "$tag" ]; then echo "tag v$tag does not match version.py ($ver)"; exit 1; fi
+          else
+            echo "Manual run on ${GITHUB_REF_NAME} -- skipping the tag/version check."
+          fi
+          rm -rf dmg-stage && mkdir dmg-stage
+          ditto "dist/Swiss Downloader.app" "dmg-stage/Swiss Downloader.app"
+          ln -s /Applications "dmg-stage/Applications"
+          # The name must say arm64: an Intel Mac cannot run this, and the only
+          # thing standing between that user and a confusing failure is the
+          # filename they clicked.
+          out="dist/Swiss-Downloader-v${ver}-macOS-arm64.dmg"
+          hdiutil create -volname "Swiss Downloader" -srcfolder dmg-stage \
+                         -ov -format UDZO "$out"
+          ls -lh "$out"
+
+      - name: Upload to GitHub Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          # Workspace-relative -- see the note on the Windows upload above.
+          files: Documents/flac-downloader/dist/Swiss-Downloader-v*-macOS-arm64.dmg

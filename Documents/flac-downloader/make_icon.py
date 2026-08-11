@@ -1,10 +1,24 @@
 """
-Generates icon.ico — a Swiss army knife icon for the app.
-Run once before building: python make_icon.py
+Generates the app icon — a Swiss army knife — from code, at any size.
+
+Run once before building:
+    python make_icon.py              -> icon.ico       (Windows, PyInstaller --icon)
+    python make_icon.py --iconset    -> icon.iconset/  (macOS; feed to iconutil)
+
+macOS needs .icns, which has no pure-Python writer worth carrying. Rather than
+hand-roll a second container format the way write_ico() does, the --iconset mode
+emits the PNG set Apple's own `iconutil` expects, and the macOS CI job runs:
+
+    iconutil -c icns icon.iconset -o icon.icns
+
+Both modes draw from the same make_frame(), so the two platforms cannot drift
+into shipping different artwork.
 """
 
 import io
+import os
 import struct
+import sys
 
 try:
     from PIL import Image, ImageDraw
@@ -92,7 +106,33 @@ def write_ico(path: str, images: list[Image.Image]) -> None:
         f.write(data)
 
 
+def write_iconset(path: str = "icon.iconset") -> list[str]:
+    """
+    Write the PNG set `iconutil -c icns` expects.
+
+    The names and sizes are Apple's, not ours: iconutil rejects the folder if a
+    file is missing or misnamed, so this list is fixed. @2x is the retina
+    variant, which is simply the next size up drawn at that size — make_frame is
+    size-parametric, so each is rendered natively rather than upscaled.
+    """
+    spec = [
+        ("icon_16x16.png",        16), ("icon_16x16@2x.png",      32),
+        ("icon_32x32.png",        32), ("icon_32x32@2x.png",      64),
+        ("icon_128x128.png",     128), ("icon_128x128@2x.png",   256),
+        ("icon_256x256.png",     256), ("icon_256x256@2x.png",   512),
+        ("icon_512x512.png",     512), ("icon_512x512@2x.png",  1024),
+    ]
+    os.makedirs(path, exist_ok=True)
+    for name, size in spec:
+        make_frame(size).save(os.path.join(path, name), format="PNG")
+    return [n for n, _ in spec]
+
+
 def main():
+    if "--iconset" in sys.argv:
+        names = write_iconset()
+        print(f"icon.iconset/ saved ({len(names)} files)")
+        return
     sizes  = [16, 24, 32, 48, 64, 128, 256]
     frames = [make_frame(s) for s in sizes]
     write_ico("icon.ico", frames)

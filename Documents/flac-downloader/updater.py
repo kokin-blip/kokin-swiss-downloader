@@ -4,6 +4,7 @@ Requires GITHUB_OWNER and GITHUB_REPO set in version.py.
 """
 
 import json
+import sys
 import urllib.request
 import urllib.error
 from typing import Optional
@@ -58,20 +59,31 @@ def check(proxy: Optional[str] = None) -> Optional[dict]:
 
     if _parse(latest_tag) > _parse(__version__):
         notes = data.get("body", "").strip()
-        # Find the .exe asset for in-app download, if present.
+        # Find this platform's asset for in-app download, if present.
         #
-        # Since v1.11.0 the release asset is a .zip, not a .exe: the build moved
-        # to PyInstaller --onedir because --onefile was re-extracting 1.45 GB to
-        # %TEMP% on every launch and putting time-to-window at ~2 minutes. So
-        # this loop finds nothing, asset_url stays empty, and the UI falls back
-        # to opening the release page — deliberate, and handled, but it does mean
-        # one-click self-update is unavailable until there is an installer or a
-        # swap-the-folder path that can replace files it is currently running.
+        # This MUST be platform-aware. Since v1.13.0 a release carries both a
+        # Windows Setup .exe and a macOS .dmg, and the old version of this loop
+        # took the first asset ending in ".exe" — which on a Mac means happily
+        # handing backend.install_update() the *Windows installer* to run.
+        #
+        # (History, since the previous comment here was stale: v1.11.0 shipped a
+        # .zip, so this loop found nothing and the UI fell back to opening the
+        # release page. v1.12.0 moved to an Inno Setup installer, which is a
+        # single .exe again, restoring one-click update on Windows.)
+        _WANT = {"win32": ".exe", "darwin": ".dmg"}.get(sys.platform)
         asset_url = ""
-        for asset in data.get("assets", []):
-            if (asset.get("name", "").lower().endswith(".exe")):
-                asset_url = asset.get("browser_download_url", "")
-                break
+        if _WANT:
+            for asset in data.get("assets", []):
+                if asset.get("name", "").lower().endswith(_WANT):
+                    asset_url = asset.get("browser_download_url", "")
+                    break
+
+        # Only Windows can install its own update. Replacing a running .app out
+        # of a mounted DMG is a Sparkle-sized job and is deliberately not built
+        # yet, so macOS gets the release-page fallback the UI already has: blank
+        # the URL rather than offering a button that cannot work.
+        if sys.platform != "win32":
+            asset_url = ""
         return {
             "version":   latest_tag.lstrip("v"),
             "notes":     notes[:2000],          # cap to avoid giant changelogs

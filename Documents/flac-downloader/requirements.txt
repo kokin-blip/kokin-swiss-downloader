@@ -2,6 +2,22 @@ yt-dlp>=2024.1.0
 curl_cffi>=0.7
 rich>=13.0.0
 playwright>=1.40
+# The UI itself (app.py imports webview at module scope). This was undeclared
+# until v1.13.0 and everything still worked, because it was installed on the
+# machine that ran build.bat — but CI does `pip install -r requirements.txt` and
+# nothing else, so a CI build would have shipped without it. The [cocoa] extra
+# pulls the pyobjc bindings the macOS backend needs; on Windows the WebView2
+# path needs no extra. Note that `import webview` succeeds WITHOUT the backend
+# — pywebview only loads the platform backend at webview.start() — which is why
+# app.py's self-test imports the backend module explicitly.
+pywebview>=6.0
+pywebview[cocoa]>=6.0; sys_platform == "darwin"
+# utils.app_data_dir() imports user_data_dir from it. Also undeclared until
+# v1.13.0, and it arrives transitively today. If that transitive edge ever
+# drops, app_data_dir() silently falls back to ~/.flac-downloader and every
+# user looks like they lost their settings and history — a failure worth
+# spending one line to prevent.
+platformdirs>=3.0
 # Image conversion in the Convert tab, and cover-art re-encoding in utils.py.
 # utils.py treats it as optional (magic-byte fallback), but convert.py needs it
 # for real: ffmpeg has no ICO muxer and mangles animated GIF/WebP.

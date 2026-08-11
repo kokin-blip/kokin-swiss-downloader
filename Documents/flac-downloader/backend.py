@@ -44,7 +44,12 @@ from utils import (app_data_dir, find_ffmpeg, tag_flac_file, flac_cover_info,
 from version import __version__, GITHUB_OWNER, GITHUB_REPO
 
 DEFAULT_OUT       = str(Path.home() / "Music"  / "Swiss Downloads")
-DEFAULT_VIDEO_OUT = str(Path.home() / "Videos" / "Swiss Downloads")
+# ~/Music exists on both platforms, but the video folder does not: macOS calls it
+# Movies, and defaulting to a ~/Videos that no Mac has would silently create a
+# stray folder outside the one place a Mac user looks for it.
+DEFAULT_VIDEO_OUT = str(Path.home()
+                        / ("Movies" if sys.platform == "darwin" else "Videos")
+                        / "Swiss Downloads")
 
 # Resilience options applied to every yt-dlp call.
 #
@@ -843,6 +848,16 @@ class API:
         import os, tempfile, subprocess
         import urllib.request
 
+        # Windows only, and checked before anything else. Everything below is
+        # Inno Setup specific, and the Popen at the end passes creationflags,
+        # which raises ValueError outright on POSIX — so without this guard a Mac
+        # build does not degrade, it crashes. updater.check() already blanks
+        # asset_url off Windows so this should be unreachable; it is here because
+        # "should be unreachable" is not a guarantee.
+        if sys.platform != "win32":
+            return {"ok": False,
+                    "msg": "In-app update is Windows-only for now. Open the "
+                           "release page to download the latest version."}
         if not getattr(sys, "frozen", False):
             return {"ok": False,
                     "msg": "Auto-install only works in the built .exe. "

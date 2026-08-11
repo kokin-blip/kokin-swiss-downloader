@@ -50,8 +50,24 @@ def selftest() -> int:
         from utils import find_ffmpeg
         d = find_ffmpeg()
         if not d:
-            raise RuntimeError("ffmpeg.exe not found")
+            raise RuntimeError(
+                f"{'ffmpeg.exe' if sys.platform == 'win32' else 'ffmpeg'} not found")
         return str(d)
+
+    def _webview_backend():
+        # `import webview` at the top of this file proves the package is present,
+        # but NOT that the UI can start: pywebview loads its platform backend
+        # lazily inside webview.start(), so a bundle missing pyobjc on macOS (or
+        # pythonnet on Windows) imports perfectly and then fails to open a
+        # window. Importing the backend here is what turns that into a build
+        # failure instead of a user's first launch.
+        mod = {"darwin": "webview.platforms.cocoa",
+               "win32":  "webview.platforms.winforms"}.get(sys.platform)
+        if not mod:
+            return f"no backend check for {sys.platform}"
+        import importlib
+        importlib.import_module(mod)
+        return mod
 
     def _model():
         p = photo._bundled_model()
@@ -75,6 +91,7 @@ def selftest() -> int:
         return f"seeded at {photo.model_path()}"
 
     check("Pillow imports", _pillow)
+    check("webview backend imports", _webview_backend)
     check("ffmpeg is bundled", _ffmpeg)
     check("cutout model is bundled", _model)
     check("rembg + onnxruntime import", _rembg)
