@@ -23,6 +23,17 @@ on:
   # touches a release.
   workflow_dispatch:
 
+# Required to create the release and attach the installer and the DMG. Without
+# it GITHUB_TOKEN is read-only and the upload step dies with
+# "403 Resource not accessible by integration" AFTER a full ~25-minute build --
+# the tag is pushed, both artifacts exist on the runner, and nothing is
+# published. Not needed while every release was uploaded by hand with
+# `gh release create`, which ran as the user rather than as the workflow.
+#
+# contents: write is the whole requirement; nothing here needs any other scope.
+permissions:
+  contents: write
+
 jobs:
   build-windows:
     runs-on: windows-latest
