@@ -8,6 +8,11 @@ we let the user sign in once in a real Chromium window (the same one already
 bundled for stream sniffing), keep the resulting cookies, and hand them to
 yt-dlp on later downloads for that site.
 
+The macOS build has no bundled Chromium (PyInstaller cannot ad-hoc sign
+Playwright's nested browser .app — see backend._chromium_bundled), so nothing
+here is ever populated there. Existing jars are still read and used; there is
+just no way to capture a new one on that platform.
+
 UNLIKE THE REST OF THIS APP'S STORAGE, THESE FILES ARE CREDENTIALS. A session
 cookie is as good as a password for as long as it lives, so:
   - they live in their own directory, one file per site, never in settings.json

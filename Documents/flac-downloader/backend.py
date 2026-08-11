@@ -247,6 +247,34 @@ def _best_stream(found, page_url):
     return max(found, key=score)  # max() is stable: ties keep first-seen order
 
 
+def _chromium_bundled() -> bool:
+    """
+    True when this build actually carries a Chromium for Playwright to launch.
+
+    The macOS build ships without one. PyInstaller ad-hoc signs every binary it
+    collects on arm64, and Playwright's Chromium is a nested
+    "Google Chrome for Testing.app" whose inner executable codesign refuses to
+    sign — which kills the build outright, so the Mac job never installs it.
+
+    Without this check Playwright raises its own error, and that error tells the
+    user to "run playwright install" — advice nobody using a packaged app can
+    act on. Checking here instead routes both call sites to the
+    "isn't bundled in this build" message they already had.
+
+    Unfrozen (a dev checkout) always returns True: whatever Playwright finds in
+    the normal cache is the right answer there.
+    """
+    if not getattr(sys, "frozen", False):
+        return True
+    try:
+        import playwright
+        root = (Path(playwright.__file__).parent
+                / "driver" / "package" / ".local-browsers")
+        return root.is_dir() and any(root.iterdir())
+    except Exception:
+        return False
+
+
 def _browser_login(page_url, log, timeout=600, should_abort=None):
     """
     Open a REAL (visible) browser window so the user can sign in / clear an age
@@ -267,6 +295,10 @@ def _browser_login(page_url, log, timeout=600, should_abort=None):
         from playwright.sync_api import sync_playwright
     except Exception:
         return 0, "Playwright isn't bundled in this build."
+    if not _chromium_bundled():
+        return 0, ("Browser sign-in isn't available in this build — it ships "
+                   "without a bundled browser. Downloads that don't need a "
+                   "login work normally.")
 
     import time as _t
     aborted = should_abort or (lambda: False)
@@ -348,6 +380,13 @@ def _browser_grab(page_url, log, timeout=60, attempts=3, should_abort=None):
         from playwright.sync_api import sync_playwright
     except Exception:
         log("Browser grab unavailable (Playwright not bundled in this build).", "warn")
+        return None, None, None
+    # Checked before the retry loop, not inside it: with no browser present
+    # every attempt fails identically, so retrying three times would only make
+    # the user wait longer for the same answer.
+    if not _chromium_bundled():
+        log("Browser grab unavailable (this build ships without a bundled browser).",
+            "warn")
         return None, None, None
 
     import time as _t

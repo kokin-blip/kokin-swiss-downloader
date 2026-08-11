@@ -290,10 +290,27 @@ jobs:
           ./ffmpeg/ffmpeg -version | head -n 1
           file ffmpeg/ffmpeg
 
-      - name: Install Playwright Chromium
-        env:
-          PLAYWRIGHT_BROWSERS_PATH: "0"
-        run: python -m playwright install chromium
+      # NOTE: deliberately NO "playwright install" step here, unlike the Windows
+      # job. The macOS bundle ships without Chromium.
+      #
+      # Why: on arm64 PyInstaller ad-hoc signs every binary it collects, and
+      # --collect-all playwright sweeps in Playwright's Chromium, which is
+      # itself a nested "Google Chrome for Testing.app". codesign refuses to
+      # sign a bundle's inner executable ("bundle format unrecognized, invalid,
+      # or unsuitable") and the whole build dies at COLLECT. Windows never hits
+      # this because Windows signs nothing.
+      #
+      # Leaving the step out means .local-browsers is never created inside the
+      # package, so --collect-all finds nothing to sign. The cost is that the
+      # two Playwright-backed features (cookie sign-in and the browser-grab
+      # stream sniffer) are unavailable on macOS; backend._chromium_bundled()
+      # detects that and takes the "not bundled in this build" path both call
+      # sites have always had. Everything else is unaffected.
+      #
+      # If Chromium is ever wanted here, the route is to ship it as an opaque
+      # tarball added with --add-data and untar it on first use -- tar restores
+      # the exec bits and symlinks that a plain data copy destroys, and
+      # PyInstaller never tries to sign an archive.
 
       - name: Fetch the background-removal model
         run: |
@@ -318,9 +335,9 @@ jobs:
       #   * ":" not ";" as the --add-data / --add-binary separator
       #   * icon.icns not icon.ico
       #   * --osx-bundle-identifier, which macOS uses to identify the app
+      # No PLAYWRIGHT_BROWSERS_PATH here, unlike the Windows job -- there are no
+      # browsers to collect. See the note above the model step.
       - name: Build app bundle
-        env:
-          PLAYWRIGHT_BROWSERS_PATH: "0"
         run: |
           pyinstaller \
             --noconfirm \
@@ -356,14 +373,27 @@ jobs:
           if [ ! -d "$APP" ]; then echo "No .app produced -- refusing to publish."; exit 1; fi
           mb=$(du -sm "$APP" | cut -f1)
           echo "Built app bundle: ${mb} MB"
-          # Same cheap signal as the Windows job: a bundle missing Chromium or
-          # the cutout model still builds, just hundreds of MB lighter. This
-          # threshold is a first guess -- tighten it once a green build reports
-          # a real number, the way the Windows job's 900 was set.
-          if [ "$mb" -lt 700 ]; then
-            echo "App bundle is only ${mb} MB -- the browser or the cutout model is probably missing."
+          # Deliberately much lower than the Windows job's 900: this bundle
+          # carries no Chromium (see the note above the model step), so a few
+          # hundred MB of the Windows figure simply is not here. The number is
+          # uncalibrated -- no green macOS build has ever reported one -- so it
+          # is set low enough to not false-fail and is only catching a
+          # catastrophically empty bundle. Tighten it once a build reports real
+          # numbers. The two find checks below are the checks with teeth.
+          if [ "$mb" -lt 250 ]; then
+            echo "App bundle is only ${mb} MB -- something large failed to collect."
             exit 1
           fi
+          # Chromium must NOT be in here. If it ever reappears, the build will
+          # have died at COLLECT long before this line -- but if some future
+          # PyInstaller signs it successfully, this says so out loud rather than
+          # letting an extra 400 MB ride along unnoticed.
+          if find "$APP" -name "*Chrome for Testing*" | grep -q .; then
+            echo "NOTE: Chromium is in the bundle after all -- the macOS notes above are now stale."
+          fi
+          ff=$(find "$APP" -type f -name ffmpeg | head -n 1)
+          if [ -z "$ff" ]; then echo "ffmpeg is not in the bundle -- --add-binary did not take."; exit 1; fi
+          echo "ffmpeg: $ff"
           # Located with find rather than a hardcoded path: PyInstaller splits a
           # .app into Contents/Resources and Contents/Frameworks and symlinks
           # between them, and which side the model lands on is a PyInstaller
