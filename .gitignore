@@ -4,6 +4,14 @@
 # Except the project and the readme
 !README.md
 !.gitignore
+
+# GitHub only reads workflows from .github/ at the REPOSITORY ROOT, which for
+# this repo is the home directory -- so the CI config has to live here, above
+# the project it builds. The /* rule above would swallow it: release.yml is
+# tracked only because it was force-added once, and without this line any NEW
+# file under .github/ (a second workflow, a composite action, dependabot.yml)
+# is refused by `git add` and skipped silently by `git add -A`.
+!.github/
 !Documents/
 Documents/*
 !Documents/flac-downloader/
