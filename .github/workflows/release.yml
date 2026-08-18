@@ -253,6 +253,17 @@ jobs:
           # offers it to every existing user as an automatic update. Promote a
           # build by unticking "pre-release" on the Releases page once it has
           # actually been run by a person, not by defaulting this to false.
+          #
+          # v1.13.0 was promoted exactly that way -- by hand, after its installer
+          # was installed and launched on a real machine, with `gh release edit
+          # v1.13.0 --prerelease=false --latest`. So the release now DISAGREES
+          # with the line below, and that is deliberate.
+          #
+          # The trap: re-pushing an already-promoted tag re-runs this job, and
+          # action-gh-release applies prerelease: true to the EXISTING release --
+          # silently demoting it. That pulls it back out of releases/latest, and
+          # every updater.py in the field falls back to whatever older release is
+          # newest-non-prerelease. Re-promote by hand after any such re-run.
           prerelease: true
           # The release body becomes the changelog shown in-app.
           # Edit it on the GitHub Releases page after the tag is pushed.
@@ -474,7 +485,8 @@ jobs:
         with:
           # Workspace-relative -- see the note on the Windows upload above.
           files: Documents/flac-downloader/dist/Swiss-Downloader-v*-macOS-arm64.dmg
-          # See the Windows upload for why this must stay true. Both jobs target
-          # the same release, so both have to agree -- a false here would undo
-          # the Windows job's true.
+          # See the Windows upload for why this must stay true, and for the
+          # re-tag trap that demotes an already-promoted release. Both jobs
+          # target the same release, so both have to agree -- a false here would
+          # undo the Windows job's true.
           prerelease: true
